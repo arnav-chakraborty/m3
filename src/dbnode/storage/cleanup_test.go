@@ -39,14 +39,69 @@ import (
 	"github.com/m3db/m3/src/dbnode/retention"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/ident"
+	"github.com/m3db/m3/src/x/os"
 	xtest "github.com/m3db/m3/src/x/test"
 	xtime "github.com/m3db/m3/src/x/time"
+	"go.uber.org/zap"
 )
 
 var (
 	retentionOptions = retention.NewOptions()
 	namespaceOptions = namespace.NewOptions()
 )
+
+// MockRollupProcessor is a mock of RollupProcessor interface
+type MockRollupProcessor struct {
+	ctrl     *gomock.Controller
+	recorder *MockRollupProcessorMockRecorder
+}
+
+// MockRollupProcessorMockRecorder is the mock recorder for MockRollupProcessor
+type MockRollupProcessorMockRecorder struct {
+	mock *MockRollupProcessor
+}
+
+// NewMockRollupProcessor creates a new mock instance
+func NewMockRollupProcessor(ctrl *gomock.Controller) *MockRollupProcessor {
+	mock := &MockRollupProcessor{ctrl: ctrl}
+	mock.recorder = &MockRollupProcessorMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use
+func (m *MockRollupProcessor) EXPECT() *MockRollupProcessorMockRecorder {
+	return m.recorder
+}
+
+// Process mocks the Process method
+func (m *MockRollupProcessor) Process(ctx context.Context, ns namespace.Metadata, shardID uint32, blockTime xtime.UnixNano) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Process", ctx, ns, shardID, blockTime)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Process indicates an expected call of Process
+func (mr *MockRollupProcessorMockRecorder) Process(ctx, ns, shardID, blockTime interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Process", reflect.TypeOf((*MockRollupProcessor)(nil).Process), ctx, ns, shardID, blockTime)
+}
+
+// NeedsRollup mocks the NeedsRollup method
+func (m *MockRollupProcessor) NeedsRollup(ns namespace.Metadata, shardID uint32, blockTime xtime.UnixNano, rule retention.RollupRuleOptions) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NeedsRollup", ns, shardID, blockTime, rule)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NeedsRollup indicates an expected call of NeedsRollup
+func (mr *MockRollupProcessorMockRecorder) NeedsRollup(ns, shardID, blockTime, rule interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NeedsRollup", reflect.TypeOf((*MockRollupProcessor)(nil).NeedsRollup), ns, shardID, blockTime, rule)
+}
+
 
 func TestCleanupManagerCleanupCommitlogsAndSnapshots(t *testing.T) {
 	ctrl := xtest.NewController(t)
@@ -366,12 +421,214 @@ func TestCleanupManagerNamespaceCleanupBootstrapped(t *testing.T) {
 	db := newMockdatabase(ctrl, ns)
 	db.EXPECT().OwnedNamespaces().Return(nses, nil).AnyTimes()
 
-	mgr := newCleanupManager(db, newNoopFakeActiveLogs(), tally.NoopScope).(*cleanupManager)
+	mgr := newCleanupManager(db, newNoopFakeActiveLogs(), nil, tally.NoopScope).(*cleanupManager)
 	idx.EXPECT().CleanupExpiredFileSets(ts).Return(nil)
 	idx.EXPECT().CleanupCorruptedFileSets().Return(nil)
 	idx.EXPECT().CleanupDuplicateFileSets([]uint32{42}).Return(nil)
 	require.NoError(t, cleanup(mgr, ts))
 }
+
+func TestCleanupManager_ProcessRollups(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	mockDb := NewMockdatabase(ctrl)
+	mockActiveLogs := newNoopFakeActiveLogs()
+	mockRollupProcessor := NewMockRollupProcessor(ctrl)
+	testScope := tally.NewTestScope("test", nil)
+
+	now := xtime.Now()
+	blockTime1 := now.Add(-2 * time.Hour)
+	blockTime2 := now.Add(-4 * time.Hour)
+
+	// Mock namespace and shards
+	mockShard1 := NewMockdatabaseShard(ctrl)
+	mockShard1.EXPECT().ID().Return(uint32(1)).AnyTimes()
+
+	mockShard2 := NewMockdatabaseShard(ctrl)
+	mockShard2.EXPECT().ID().Return(uint32(2)).AnyTimes()
+
+	nsOpts := namespace.NewOptions().
+		SetRetentionOptions(retention.NewOptions().SetBlockSize(2 * time.Hour)).
+		SetCleanupEnabled(true).
+		SetContextOptions(context.NewOptions()) // Ensure ContextOptions is not nil
+
+	nsOpts.RetentionOptions().SetRollupRules([]retention.RollupRuleOptions{
+		// Add a dummy rule to make sure rollup processing is attempted
+		retention.NewMockRollupRuleOptions(ctrl),
+	})
+
+
+	mockNs1 := NewMockdatabaseNamespace(ctrl)
+	mockNs1.EXPECT().ID().Return(ident.StringID("ns1")).AnyTimes()
+	mockNs1.EXPECT().Options().Return(nsOpts).AnyTimes()
+	mockNs1.EXPECT().OwnedShards().Return([]databaseShard{mockShard1}).AnyTimes()
+
+	mockNs2 := NewMockdatabaseNamespace(ctrl)
+	mockNs2.EXPECT().ID().Return(ident.StringID("ns2")).AnyTimes()
+	mockNs2.EXPECT().Options().Return(nsOpts).AnyTimes() // Same options for simplicity
+	mockNs2.EXPECT().OwnedShards().Return([]databaseShard{mockShard2}).AnyTimes()
+
+	namespaces := []databaseNamespace{mockNs1, mockNs2}
+	mockDb.EXPECT().OwnedNamespaces().Return(namespaces, nil).AnyTimes()
+	mockDb.EXPECT().Options().Return(DefaultTestOptions()).AnyTimes() // For fsOpts
+
+	cm := newCleanupManager(mockDb, mockActiveLogs, mockRollupProcessor, testScope).(*cleanupManager)
+
+	// Mock fs.ReadInfoFiles
+	originalReadInfoFilesFn := fs.ReadInfoFiles // Save original
+	fs.ReadInfoFiles = func(opts fs.ReadInfoFilesOptions) ([]fs.ReadInfoFileResult, error) {
+		results := []fs.ReadInfoFileResult{}
+		if opts.Namespace.String() == "ns1" && opts.Shard == 1 {
+			results = append(results, fs.ReadInfoFileResult{Info: persist.NewInfoFromFields(int64(blockTime1), 0, 0, 0, 0, 0)})
+		}
+		if opts.Namespace.String() == "ns2" && opts.Shard == 2 {
+			results = append(results, fs.ReadInfoFileResult{Info: persist.NewInfoFromFields(int64(blockTime2), 0, 0, 0, 0, 0)})
+		}
+		return results, nil
+	}
+	defer func() { fs.ReadInfoFiles = originalReadInfoFilesFn }() // Restore
+
+	// Expectations for RollupProcessor.Process
+	// Use gomock.Any() for context.Context as it's tricky to match precisely
+	mockRollupProcessor.EXPECT().Process(gomock.Any(), mockNs1, uint32(1), blockTime1).Return(nil).Times(1)
+	mockRollupProcessor.EXPECT().Process(gomock.Any(), mockNs2, uint32(2), blockTime2).Return(nil).Times(1)
+
+	err := cm.processRollups(namespaces)
+	require.NoError(t, err)
+}
+
+func TestCleanupManager_CleanupExpiredRollupDataFiles(t *testing.T) {
+	ctrl := xtest.NewController(t)
+	defer ctrl.Finish()
+
+	testScope := tally.NewTestScope("test_cleanup_expired_rollup", nil)
+	logger := zap.NewNop() // Or zaptest.NewLogger(t) for output
+
+	// Setup temp directory structure
+	tempBaseDir, err := os.MkdirTemp("", "cleanup_rollup_test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempBaseDir)
+
+	nsID := ident.StringID("testns_expired_rollup")
+	shardID := uint32(0)
+
+	// Mock database and options
+	mockDb := NewMockdatabase(ctrl)
+	commitLogOpts := commitlog.NewOptions().SetFilesystemOptions(
+		fs.NewOptions().SetFilePathPrefix(tempBaseDir),
+	)
+	dbOpts := DefaultTestOptions().SetCommitLogOptions(commitLogOpts)
+	mockDb.EXPECT().Options().Return(dbOpts).AnyTimes()
+
+	// Create cleanupManager instance
+	// RollupProcessor is not used by cleanupExpiredRollupDataFiles directly, so can be nil or a simple mock
+	mockRollupProc := NewMockRollupProcessor(ctrl)
+	cm := newCleanupManager(mockDb, newNoopFakeActiveLogs(), mockRollupProc, testScope).(*cleanupManager)
+	cm.logger = logger // Assign logger
+
+	// --- Directory structure ---
+	// tempBaseDir/
+	//   testns_expired_rollup/
+	//     0/  (shardID)
+	//       1000/ (blockTime: expired)
+	//         rollup_1m/ (should be deleted)
+	//           info.db (dummy file)
+	//         rollup_5m/ (should be deleted)
+	//           info.db (dummy file)
+	//         raw_data_files... (not touched by this specific function)
+	//       2000/ (blockTime: not expired)
+	//         rollup_1m/ (should NOT be deleted)
+	//           info.db (dummy file)
+	//       3000/ (blockTime: expired, but no rollup dir)
+	//         raw_data_files...
+	//       4000/ (blockTime: expired)
+	//         not_a_rollup_dir/ (should NOT be deleted)
+	//           info.db
+	//         rollup_10m/ (should be deleted)
+	//           info.db
+	//---------------------------
+
+	now := xtime.Now()
+	expiredBlockTime1 := now.Add(-10 * time.Hour) // 1000 in our made-up nanosecond scale
+	notExpiredBlockTime := now.Add(-1 * time.Hour)  // 2000
+	expiredBlockTime2 := now.Add(-12 * time.Hour) // 3000
+	expiredBlockTime3 := now.Add(-14 * time.Hour) // 4000
+
+	// Retention period: 5 hours. So anything older than 5 hours from 'now' is expired.
+	// earliestToRetain = now - 5h
+	retentionPeriod := 5 * time.Hour
+	earliestToRetain := now.Add(-retentionPeriod)
+
+	// Create directories and dummy files
+	shardPath := fs.ShardDirPath(tempBaseDir, nsID, shardID)
+
+	// Block 1000 (expired)
+	block1000Path := filepath.Join(shardPath, fmt.Sprintf("%d", expiredBlockTime1.UnixNano()))
+	rollup1mPathB1 := filepath.Join(block1000Path, "rollup_1m")
+	rollup5mPathB1 := filepath.Join(block1000Path, "rollup_5m")
+	require.NoError(t, os.MkdirAll(rollup1mPathB1, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rollup1mPathB1, "info.db"), []byte("test"), 0644))
+	require.NoError(t, os.MkdirAll(rollup5mPathB1, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rollup5mPathB1, "info.db"), []byte("test"), 0644))
+
+	// Block 2000 (not expired)
+	block2000Path := filepath.Join(shardPath, fmt.Sprintf("%d", notExpiredBlockTime.UnixNano()))
+	rollup1mPathB2 := filepath.Join(block2000Path, "rollup_1m")
+	require.NoError(t, os.MkdirAll(rollup1mPathB2, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rollup1mPathB2, "info.db"), []byte("test"), 0644))
+
+	// Block 3000 (expired, no rollup dir)
+	block3000Path := filepath.Join(shardPath, fmt.Sprintf("%d", expiredBlockTime2.UnixNano()))
+	require.NoError(t, os.MkdirAll(block3000Path, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(block3000Path, "raw.db"), []byte("test"), 0644))
+
+	// Block 4000 (expired, one rollup, one not)
+	block4000Path := filepath.Join(shardPath, fmt.Sprintf("%d", expiredBlockTime3.UnixNano()))
+	notRollupPathB4 := filepath.Join(block4000Path, "not_a_rollup_dir")
+	rollup10mPathB4 := filepath.Join(block4000Path, "rollup_10m")
+	require.NoError(t, os.MkdirAll(notRollupPathB4, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(notRollupPathB4, "info.db"), []byte("test"), 0644))
+	require.NoError(t, os.MkdirAll(rollup10mPathB4, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rollup10mPathB4, "info.db"), []byte("test"), 0644))
+
+
+	// Mock namespace and shard objects
+	mockNs := NewMockdatabaseNamespace(ctrl)
+	mockNs.EXPECT().ID().Return(nsID).AnyTimes()
+	// Options needed by cleanupExpiredRollupDataFiles for fsOpts
+	mockNs.EXPECT().Options().Return(namespace.NewOptions().SetRetentionOptions(retention.NewOptions().SetRetentionPeriod(retentionPeriod))).AnyTimes()
+
+
+	mockShard := NewMockdatabaseShard(ctrl)
+	mockShard.EXPECT().ID().Return(shardID).AnyTimes()
+
+	// Execute the function
+	err = cm.cleanupExpiredRollupDataFiles(earliestToRetain, mockNs, []databaseShard{mockShard})
+	require.NoError(t, err)
+
+	// Assertions
+	// Expired and should be deleted
+	_, err = os.Stat(rollup1mPathB1)
+	require.True(t, os.IsNotExist(err), "rollup_1m for expired block 1000 should be deleted")
+	_, err = os.Stat(rollup5mPathB1)
+	require.True(t, os.IsNotExist(err), "rollup_5m for expired block 1000 should be deleted")
+	_, err = os.Stat(rollup10mPathB4)
+	require.True(t, os.IsNotExist(err), "rollup_10m for expired block 4000 should be deleted")
+
+	// Not expired, should still exist
+	_, err = os.Stat(rollup1mPathB2)
+	require.NoError(t, err, "rollup_1m for not-expired block 2000 should exist")
+
+	// Not a rollup dir, should still exist
+	_, err = os.Stat(notRollupPathB4)
+	require.NoError(t, err, "not_a_rollup_dir for expired block 4000 should exist")
+
+	// Raw data in expired block 3000 should still exist (not touched by this func)
+	_, err = os.Stat(filepath.Join(block3000Path, "raw.db"))
+	require.NoError(t, err, "raw.db for expired block 3000 should exist")
+}
+
 
 func TestCleanupManagerNamespaceCleanupNotBootstrapped(t *testing.T) {
 	ctrl := xtest.NewController(t)
@@ -404,7 +661,7 @@ func TestCleanupManagerNamespaceCleanupNotBootstrapped(t *testing.T) {
 	db := newMockdatabase(ctrl, ns)
 	db.EXPECT().OwnedNamespaces().Return(nses, nil).AnyTimes()
 
-	mgr := newCleanupManager(db, newNoopFakeActiveLogs(), tally.NoopScope).(*cleanupManager)
+	mgr := newCleanupManager(db, newNoopFakeActiveLogs(), nil, tally.NoopScope).(*cleanupManager)
 	require.NoError(t, cleanup(mgr, ts))
 }
 

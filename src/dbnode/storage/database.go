@@ -237,8 +237,27 @@ func NewDatabase(
 			zap.Error(err))
 	}
 
+	// Create RollupProcessor instance
+	rollupOpts := rollupProcessorOptions{
+		clockOpts:           opts.ClockOptions(),
+		fsOpts:              opts.CommitLogOptions().FilesystemOptions(), // This is persist.FilesystemOptions which is pfs.Options
+		seriesPool:          opts.SeriesPool(),                           // Assuming SeriesPool is available on Options
+		encoderPool:         opts.EncoderPool(),
+		multiReaderIterPool: opts.MultiReaderIteratorPool(),
+		iteratorPools:       opts.IteratorPools(),
+		identifierPool:      opts.IdentifierPool(),
+		logger:              iopts.Logger().With(zap.String("component", "rollup-processor")),
+	}
+	rollupProcessor, err := NewRollupProcessor(rollupOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rollup processor: %w", err)
+	}
+
+	// TODO: Modify newMediator signature and implementation to accept rollupProcessor
+	// and pass it down to newCleanupManager.
+	// For now, rollupProcessor is created but not passed.
 	d.mediator, err = newMediator(
-		d, commitLog, opts.SetInstrumentOptions(databaseIOpts))
+		d, commitLog, opts.SetInstrumentOptions(databaseIOpts)) // rollupProcessor would be passed here
 	if err != nil {
 		return nil, err
 	}

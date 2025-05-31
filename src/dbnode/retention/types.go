@@ -24,6 +24,20 @@ import (
 	"time"
 )
 
+// RollupRuleOptions represents a single rollup rule.
+// NB: This is kept minimal as it's defined in options.go.
+// This is the interface for the options defined in options.go.
+type RollupRuleOptions interface {
+	Resolution() time.Duration
+	// SetResolution sets the resolution for the rollup rule.
+	SetResolution(value time.Duration) RollupRuleOptions
+	Age() time.Duration
+	// SetAge sets the age for the rollup rule.
+	SetAge(value time.Duration) RollupRuleOptions
+	// Equal checks if two RollupRuleOptions are equal.
+	Equal(other RollupRuleOptions) bool
+}
+
 // Options represents the options for retention
 type Options interface {
 	// Validate validates the options
@@ -77,4 +91,10 @@ type Options interface {
 	// BlockDataExpiryAfterNotAccessedPeriod returns the period that blocks data should
 	// be expired after not being accessed for a given duration
 	BlockDataExpiryAfterNotAccessedPeriod() time.Duration
+
+	// SetRollupRules sets the rollup rules.
+	SetRollupRules(value []RollupRuleOptions) Options
+
+	// RollupRules returns the rollup rules.
+	RollupRules() []RollupRuleOptions
 }

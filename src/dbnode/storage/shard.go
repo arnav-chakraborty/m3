@@ -358,12 +358,81 @@ func (s *dbShard) Stream(
 	onRetrieve block.OnRetrieveBlock,
 	nsCtx namespace.Context,
 ) (xio.BlockReader, error) {
+	// Check for rollup data first
+	// Construct the base path for the block: dataDirPrefix/namespaceID/shardID/blockTimeUnixNano/
+	filePathPrefix := s.opts.CommitLogOptions().FilesystemOptions().FilePathPrefix()
+	nsID := s.namespace.ID()
+	shardID := s.ID()
+	blockTimeDirName := fmt.Sprintf("%d", blockStart.UnixNano())
+	// Path to the specific block start time directory e.g. /var/lib/m3db/data/ns1/0/1609459200000000000
+	blockPath := fs.ShardDataDirPath(filePathPrefix, nsID, shardID)
+	blockPath = filepath.Join(blockPath, blockTimeDirName)
+
+	// List directories inside blockPath
+	entries, err := os.ReadDir(blockPath)
+	if err == nil { // if err is nil, blockPath exists
+		var chosenRollupPath string
+		var chosenRollupResolution string
+
+		sortedRollupDirs := []string{}
+		for _, entry := range entries {
+			if entry.IsDir() && isRollupDir(entry.Name()) { // isRollupDir from cleanup.go (checks "rollup_" prefix)
+				sortedRollupDirs = append(sortedRollupDirs, entry.Name())
+			}
+		}
+		// Sort to prefer a certain resolution, e.g., alphabetically for now.
+		// A more sophisticated strategy could parse resolution from dirname and sort.
+		sort.Strings(sortedRollupDirs)
+
+		if len(sortedRollupDirs) > 0 {
+			// For now, pick the first one found (e.g., after sorting).
+			// Example: "rollup_1h", "rollup_5m". Sorts to "rollup_1h", "rollup_5m".
+			// If we want coarsest, sort descending. If finest, sort ascending.
+			// Alphabetical sort might be good enough for a predictable first choice.
+			chosenRollupDirName := sortedRollupDirs[0]
+			chosenRollupPath = filepath.Join(blockPath, chosenRollupDirName)
+			chosenRollupResolution = chosenRollupDirName // Or parse from name
+
+			s.logger.Debug("found rollup data, attempting to stream",
+				zap.String("namespace", nsID.String()),
+				zap.Uint32("shard", shardID),
+				zap.Time("blockStart", blockStart.ToTime()),
+				zap.String("id", id.String()),
+				zap.String("rollupPath", chosenRollupPath),
+				zap.String("resolution", chosenRollupResolution),
+			)
+
+			// TODO: Actually stream from chosenRollupPath.
+			// This requires a new fs.Reader configured for this path.
+			// For now, we'll log and fall through to default raw data path.
+			// If streaming from rollup was attempted and failed, should we still fallback?
+			// For now, assume if a rollup path exists, we *try* it, if that specific try fails,
+			// it's an error for that rollup path. Fallback would only occur if no rollup path was chosen.
+			// To implement actual read:
+			//  tempFsOpts := s.opts.CommitLogOptions().FilesystemOptions().SetFilePathPrefix(chosenRollupPath)
+			//  reader := fs.NewReader(tempFsOpts)
+			//  reader.Open(...) with identifier relative to this new prefix (might be tricky)
+			//  OR, if blockRetriever can take a base path / fileset type:
+			//  return s.DatabaseBlockRetriever.StreamFromPath(ctx, s.shard, id, blockStart, onRetrieve, nsCtx, chosenRollupPath, persist.FileSetSnapshotType)
+			// For now, we will just log and fall through. The actual read from this path will be implemented next.
+			s.logger.Info("identified rollup path for potential read", zap.String("path", chosenRollupPath))
+		}
+	} else if !os.IsNotExist(err) {
+		s.logger.Warn("could not read directory entries for potential rollups",
+			zap.String("blockPath", blockPath), zap.Error(err))
+	}
+
+	// Fallback to original data path if no rollup path chosen or if chosen path read fails (not yet implemented for chosen path read)
+	// In a subsequent change, if chosenRollupPath is set, we would attempt to read from it here.
+	// If that read fails, then we could decide whether to fallback to raw or return the error.
 	return s.DatabaseBlockRetriever.Stream(ctx, s.shard, id,
 		blockStart, onRetrieve, nsCtx)
 }
 
 // IsBlockRetrievable implements series.QueryableBlockRetriever
 func (s *dbShard) IsBlockRetrievable(blockStart xtime.UnixNano) (bool, error) {
+	// TODO: This might need to check rollup paths too if we want to surface their retrievability.
+	// For now, it reflects the raw data's flush status.
 	return s.hasWarmFlushed(blockStart)
 }
 
@@ -388,6 +457,15 @@ func (s *dbShard) warmStatusIsRetrievable(status warmStatus) bool {
 
 	return statusIsRetrievable(status.IndexFlushed)
 }
+
+// isRollupDir checks if a directory name matches the pattern "rollup_*".
+// This helper function might be duplicated from cleanup.go or should be moved to a common place.
+// For now, defined locally for clarity.
+func isRollupDir(name string) bool {
+	// Using rollupFileSetTypeStr from this package, assuming it's defined as "rollup"
+	return len(name) > len(rollupFileSetTypeStr) && name[:len(rollupFileSetTypeStr)] == rollupFileSetTypeStr && name[len(rollupFileSetTypeStr)] == '_'
+}
+
 
 func statusIsRetrievable(status fileOpStatus) bool {
 	switch status {
@@ -1102,20 +1180,75 @@ func (s *dbShard) ReadEncoded(
 		switch s.opts.SeriesCachePolicy() {
 		case series.CacheAll:
 			// No-op, would be in memory if cached
-			return nil, nil
+			// However, we should still check for on-disk rollups if the series is not in memory.
+			// The original logic for CacheAll would return nil here. We need to proceed to check disk.
+			break // Proceed to check disk for rollups / raw data
+		default:
+			// Other cache policies might imply data should be in memory or not attempt disk reads here.
+			// For now, let original logic decide, but our rollup check comes first for disk.
 		}
 	} else if err != nil {
-		return nil, err
+		return nil, err // Actual error, return it
 	}
 
+	// If entry exists in memory, it's typically faster, but a query might prefer a specific rollup.
+	// For now, if in memory, use it. Future enhancements could allow query to specify rollup preference.
 	if entry != nil {
 		return entry.Series.ReadEncoded(ctx, start, end, nsCtx)
 	}
 
+	// Entry not in memory or err was errShardEntryNotFound, try to read from disk (checking rollups first)
+	// This logic needs to be careful about block alignment for start/end vs blockStart times.
+	// ReadEncoded typically iterates over multiple blocks.
+	// The rollup check here should be for each block that ReadEncoded would touch.
+	// This is complex. For a first pass, let's assume ReadEncoded implies a single block or
+	// that the decision is made at a higher level for which block time to check.
+	// For now, we'll add a log similar to Stream, assuming `start` aligns with a block start.
+
+	filePathPrefix := s.opts.CommitLogOptions().FilesystemOptions().FilePathPrefix()
+	nsID := s.namespace.ID()
+	shardID := s.ID()
+	// NB: `start` in ReadEncoded is a timestamp, not necessarily a block start.
+	// We need to determine the blockStart that contains `start`.
+	// This simplification assumes `start` can be used to identify a block's directory.
+	// This is a bit of a leap; proper implementation would iterate relevant blockStarts for the [start,end] range.
+	blockTimeDirName := fmt.Sprintf("%d", start.Truncate(s.namespace.Options().RetentionOptions().BlockSize()).UnixNano())
+	blockPath := fs.ShardDataDirPath(filePathPrefix, nsID, shardID)
+	blockPath = filepath.Join(blockPath, blockTimeDirName)
+
+	diskEntries, diskErr := os.ReadDir(blockPath)
+	if diskErr == nil {
+		var chosenRollupPath string
+		sortedRollupDirs := []string{}
+		for _, diskEntry := range diskEntries {
+			if diskEntry.IsDir() && isRollupDir(diskEntry.Name()) {
+				sortedRollupDirs = append(sortedRollupDirs, diskEntry.Name())
+			}
+		}
+		sort.Strings(sortedRollupDirs)
+		if len(sortedRollupDirs) > 0 {
+			chosenRollupPath = filepath.Join(blockPath, sortedRollupDirs[0])
+			s.logger.Info("identified rollup path for potential ReadEncoded call",
+				zap.String("namespace", nsID.String()),
+				zap.Uint32("shard", shardID),
+				zap.Time("queryStart", start.ToTime()),
+				zap.String("id", id.String()),
+				zap.String("rollupPath", chosenRollupPath),
+			)
+			// TODO: Actual read from rollup path for ReadEncoded.
+			// This would involve series.NewReaderUsingRetriever with a retriever
+			// that is aware of this specific rollup path.
+		}
+	} else if !os.IsNotExist(diskErr) {
+		s.logger.Warn("could not read directory entries for potential rollups in ReadEncoded",
+			zap.String("blockPath", blockPath), zap.Error(diskErr))
+	}
+
+	// Fallback to original logic if no rollup chosen or if (future) rollup read fails.
 	retriever := s.seriesBlockRetriever
 	onRetrieve := s.seriesOnRetrieveBlock
-	opts := s.seriesOpts
-	reader := series.NewReaderUsingRetriever(id, retriever, onRetrieve, nil, opts)
+	seriesReadOpts := s.seriesOpts // Renamed to avoid conflict with method param opts
+	reader := series.NewReaderUsingRetriever(id, retriever, onRetrieve, nil, seriesReadOpts)
 	return reader.ReadEncoded(ctx, start, end, nsCtx)
 }
 
@@ -1811,6 +1944,35 @@ func (s *dbShard) FetchBlocksMetadataV2(
 			blockStart = blockStart.Add(-1 * blockSize)
 			continue
 		}
+
+	// Check for and log rollup directories for this blockStart
+	currentBlockPath := fs.ShardDataDirPath(s.opts.CommitLogOptions().FilesystemOptions().FilePathPrefix(), s.namespace.ID(), s.ID())
+	currentBlockPath = filepath.Join(currentBlockPath, fmt.Sprintf("%d", blockStart.UnixNano()))
+	diskEntries, diskErr := os.ReadDir(currentBlockPath)
+	if diskErr == nil {
+		sortedRollupDirs := []string{}
+		for _, diskEntry := range diskEntries {
+			if diskEntry.IsDir() && isRollupDir(diskEntry.Name()) {
+				sortedRollupDirs = append(sortedRollupDirs, diskEntry.Name())
+			}
+		}
+		if len(sortedRollupDirs) > 0 {
+			sort.Strings(sortedRollupDirs) // Sort for consistent logging if needed
+			s.logger.Info("found rollup directories for block being processed by FetchBlocksMetadataV2",
+				zap.String("namespace", s.namespace.ID().String()),
+				zap.Uint32("shard", s.ID()),
+				zap.Time("blockStart", blockStart.ToTime()),
+				zap.Strings("rollupDirs", sortedRollupDirs))
+			// TODO: Future work: Incorporate metadata from these rollup directories into the results.
+			// This would involve opening each rollup fileset (e.g., .../rollup_5m/info.db)
+			// and adding its metadata to `result`. The `block.FetchBlocksMetadataResult`
+			// would need a field for resolution, and pagination would need to handle these.
+		}
+	} else if !os.IsNotExist(diskErr) {
+		s.logger.Warn("could not read directory entries for potential rollups in FetchBlocksMetadataV2",
+			zap.String("blockPath", currentBlockPath), zap.Error(diskErr))
+	}
+
 
 		var pos readerPosition
 		if !tokenBlockStart.IsZero() {

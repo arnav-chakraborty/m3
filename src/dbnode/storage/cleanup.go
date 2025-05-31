@@ -67,6 +67,7 @@ type cleanupManager struct {
 
 	database         database
 	activeCommitlogs activeCommitlogs
+	rollupProcessor  RollupProcessor // Added RollupProcessor
 
 	opts                    Options
 	nowFn                   clock.NowFn
@@ -112,7 +113,11 @@ func newCleanupManagerMetrics(scope tally.Scope) cleanupManagerMetrics {
 }
 
 func newCleanupManager(
-	database database, activeLogs activeCommitlogs, scope tally.Scope) databaseCleanupManager {
+	database database,
+	activeLogs activeCommitlogs,
+	rollupProcessor RollupProcessor, // Added RollupProcessor
+	scope tally.Scope,
+) databaseCleanupManager {
 	opts := database.Options()
 	filePathPrefix := opts.CommitLogOptions().FilesystemOptions().FilePathPrefix()
 	commitLogsDir := fs.CommitLogsDirPath(filePathPrefix)
@@ -120,6 +125,7 @@ func newCleanupManager(
 	return &cleanupManager{
 		database:         database,
 		activeCommitlogs: activeLogs,
+		rollupProcessor:  rollupProcessor, // Store RollupProcessor
 
 		opts:                        opts,
 		nowFn:                       opts.ClockOptions().NowFn(),
@@ -152,6 +158,16 @@ func (m *cleanupManager) WarmFlushCleanup(t xtime.UnixNano) error {
 	}
 
 	multiErr := xerrors.NewMultiError()
+
+	// Process rollups first
+	if m.rollupProcessor != nil { // Ensure rollupProcessor is available
+		if err := m.processRollups(namespaces); err != nil {
+			multiErr = multiErr.Add(fmt.Errorf("encountered errors during rollup processing: %w", err))
+			// Log and continue, as per requirement not to halt cleanup on rollup failure
+			m.logger.Error("rollup processing failed", zap.Error(err))
+		}
+	}
+
 	if err := m.cleanupExpiredIndexFiles(t, namespaces); err != nil {
 		multiErr = multiErr.Add(fmt.Errorf(
 			"encountered errors when cleaning up index files for %v: %w", t, err))
@@ -184,6 +200,103 @@ func (m *cleanupManager) WarmFlushCleanup(t xtime.UnixNano) error {
 
 	return multiErr.FinalError()
 }
+
+
+func (m *cleanupManager) processRollups(namespaces []databaseNamespace) error {
+	multiErr := xerrors.NewMultiError()
+	if m.rollupProcessor == nil {
+		m.logger.Info("RollupProcessor not configured, skipping rollup processing.")
+		return nil
+	}
+
+	fsOpts := m.opts.CommitLogOptions().FilesystemOptions()
+
+	for _, ns := range namespaces {
+		if !ns.Options().CleanupEnabled() { // Or a more specific rollup enabled flag if available
+			continue
+		}
+
+		nsCtx := namespace.NewContextFrom(ns.Options().ContextOptions(), ns.ID()) // Create a valid context for Process
+		// TODO: Consider if a background context or a specific cleanup context should be used.
+		// For now, using one derived from namespace options.
+
+		rollupRules := ns.Options().RetentionOptions().RollupRules()
+		if len(rollupRules) == 0 {
+			m.logger.Debug("no rollup rules for namespace, skipping", zap.String("namespace", ns.ID().String()))
+			continue
+		}
+
+		m.logger.Info("processing rollups for namespace", zap.String("namespace", ns.ID().String()))
+
+		for _, shard := range ns.OwnedShards() {
+			// List all flushed fileset block start times for this shard
+			// fs.AllFlushedFilesGOB lists files with volume index, we need unique block starts.
+			// A more direct way to get block start times might be needed, or process the result of AllFlushedFilesGOB.
+
+			fileData := fs.ReadInfoFilesOptions{
+				FilePathPrefix: fsOpts.FilePathPrefix(),
+				Namespace:      ns.ID(),
+				Shard:          shard.ID(),
+				InfoFileType:   persist.FileSetInfoType,
+			}
+			files, err := fs.ReadInfoFiles(fileData)
+			if err != nil {
+				multiErr = multiErr.Add(fmt.Errorf(
+					"error reading info files for ns %s shard %d: %w", ns.ID().String(), shard.ID(), err))
+				continue
+			}
+
+			uniqueBlockStarts := make(map[xtime.UnixNano]struct{})
+			for _, file := range files {
+				uniqueBlockStarts[xtime.UnixNano(file.Info.BlockStart)] = struct{}{}
+			}
+
+			if len(uniqueBlockStarts) == 0 {
+				m.logger.Debug("no blocks found for shard", zap.String("namespace", ns.ID().String()), zap.Uint32("shard", shard.ID()))
+				continue
+			}
+
+			m.logger.Info("processing rollups for shard",
+				zap.String("namespace", ns.ID().String()),
+				zap.Uint32("shard", shard.ID()),
+				zap.Int("numBlocks", len(uniqueBlockStarts)),
+			)
+
+			for blockStart := range uniqueBlockStarts {
+				// Note: Rollup rules are defined on the namespace, not per block.
+				// The Process method itself will check NeedsRollup which considers the age of the block
+				// against each rule's specific age requirement.
+				// No need to filter rules here based on blockStart; Process handles it.
+				// The Process method iterates through the rules passed via ns.Metadata().
+				// We call Process once per block, and it handles all rules for that block.
+				//
+				// Update: The RollupProcessor.Process method itself iterates through rules.
+				// So we just need to call it once per block.
+				// The current RollupProcessor.Process takes (ns, shardID, blockTime) and iterates rules internally.
+				// So the loop for `rule := range rollupRules` is not needed here.
+
+				m.logger.Debug("calling RollupProcessor.Process for block",
+					zap.String("namespace", ns.ID().String()),
+					zap.Uint32("shard", shard.ID()),
+					zap.Time("blockStartTime", blockStart.ToTime()),
+				)
+				// Pass a background context or a specific context for cleanup operations.
+				// For now, using context.NewBackground() as a placeholder.
+				// A proper context should be derived from the database or cleanup manager.
+				// nsCtx provides a context with namespace metadata, which is good.
+				if err := m.rollupProcessor.Process(nsCtx, shard.ID(), blockStart); err != nil {
+					err = fmt.Errorf("error during rollup processing for ns %s shard %d block %v: %w",
+						ns.ID().String(), shard.ID(), blockStart.ToTime().String(), err)
+					multiErr = multiErr.Add(err)
+					m.logger.Error("rollup processing for block failed", zap.Error(err))
+					// Continue to the next block/shard as per requirements
+				}
+			}
+		}
+	}
+	return multiErr.FinalError()
+}
+
 
 func (m *cleanupManager) ColdFlushCleanup(t xtime.UnixNano) error {
 	m.Lock()
@@ -287,10 +400,104 @@ func (m *cleanupManager) cleanupDataFiles(t xtime.UnixNano, namespaces []databas
 		earliestToRetain := retention.FlushTimeStart(n.Options().RetentionOptions(), t)
 		shards := n.OwnedShards()
 		multiErr = multiErr.Add(m.cleanupExpiredNamespaceDataFiles(earliestToRetain, shards))
+		multiErr = multiErr.Add(m.cleanupExpiredRollupDataFiles(earliestToRetain, n, shards)) // Added call
 		multiErr = multiErr.Add(m.cleanupCompactedNamespaceDataFiles(shards))
 	}
 	return multiErr.FinalError()
 }
+
+func (m *cleanupManager) cleanupExpiredRollupDataFiles(
+	earliestToRetain xtime.UnixNano,
+	ns databaseNamespace,
+	shards []databaseShard,
+) error {
+	multiErr := xerrors.NewMultiError()
+	fsOpts := m.opts.CommitLogOptions().FilesystemOptions()
+	nsIDStr := ns.ID().String()
+
+	for _, shard := range shards {
+		shardID := shard.ID()
+		// Construct path to shard: <prefix>/<ns>/<shard>
+		shardPath := fs.ShardDirPath(fsOpts.FilePathPrefix(), ns.ID(), shardID)
+
+		// List all block time directories within the shard path
+		blockTimeDirs, err := os.ReadDir(shardPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				m.logger.Debug("shard path does not exist, skipping rollup cleanup",
+					zap.String("namespace", nsIDStr),
+					zap.Uint32("shard", shardID),
+					zap.String("path", shardPath))
+				continue
+			}
+			multiErr = multiErr.Add(fmt.Errorf("could not read block time dirs in %s: %w", shardPath, err))
+			continue
+		}
+
+		for _, blockTimeDir := range blockTimeDirs {
+			if !blockTimeDir.IsDir() {
+				continue
+			}
+
+			blockTimeNanos, err := parseBlockTimeNanoFromDirName(blockTimeDir.Name())
+			if err != nil {
+				m.logger.Debug("could not parse block time from directory name",
+					zap.String("dirName", blockTimeDir.Name()),
+					zap.String("shardPath", shardPath),
+					zap.Error(err))
+				continue
+			}
+
+			if blockTimeNanos >= earliestToRetain {
+				continue // This block is not yet expired
+			}
+
+			// Block is expired, look for rollup subdirectories
+			currentBlockPath := filepath.Join(shardPath, blockTimeDir.Name())
+			rollupDirs, err := os.ReadDir(currentBlockPath)
+			if err != nil {
+				multiErr = multiErr.Add(fmt.Errorf("could not read rollup dirs in %s: %w", currentBlockPath, err))
+				continue
+			}
+
+			for _, rollupDir := range rollupDirs {
+				if !rollupDir.IsDir() || !isRollupDir(rollupDir.Name()) { // isRollupDir checks for "rollup_" prefix
+					continue
+				}
+
+				rollupPath := filepath.Join(currentBlockPath, rollupDir.Name())
+				m.logger.Info("deleting expired rollup data directory",
+					zap.String("namespace", nsIDStr),
+					zap.Uint32("shard", shardID),
+					zap.Time("blockTime", blockTimeNanos.ToTime()),
+					zap.String("rollupDir", rollupDir.Name()),
+					zap.String("path", rollupPath),
+				)
+				if err := os.RemoveAll(rollupPath); err != nil {
+					multiErr = multiErr.Add(fmt.Errorf("failed to delete rollup dir %s: %w", rollupPath, err))
+				}
+			}
+		}
+	}
+	return multiErr.FinalError()
+}
+
+// parseBlockTimeNanoFromDirName converts a directory name (expected to be int64 xtime.UnixNano string)
+// to xtime.UnixNano.
+func parseBlockTimeNanoFromDirName(name string) (xtime.UnixNano, error) {
+	var t int64
+	_, err := fmt.Sscan(name, &t)
+	if err != nil {
+		return 0, fmt.Errorf("unable to parse int64 from %s: %w", name, err)
+	}
+	return xtime.UnixNano(t), nil
+}
+
+// isRollupDir checks if a directory name matches the pattern "rollup_*".
+func isRollupDir(name string) bool {
+	return len(name) > len(rollupFileSetTypeStr) && name[:len(rollupFileSetTypeStr)] == rollupFileSetTypeStr && name[len(rollupFileSetTypeStr)] == '_'
+}
+
 
 func (m *cleanupManager) cleanupExpiredIndexFiles(
 	t xtime.UnixNano, namespaces []databaseNamespace,

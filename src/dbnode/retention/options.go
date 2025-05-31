@@ -22,7 +22,10 @@ package retention
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/m3db/m3/src/x/time"
 )
 
 const (
@@ -58,7 +61,53 @@ var (
 	errBufferFutureTooLarge    = errors.New("buffer future must be smaller than block size")
 	errBufferPastTooLarge      = errors.New("buffer past must be smaller than block size")
 	errRetentionPeriodTooSmall = errors.New("retention period must not be smaller than block size")
+	errRollupRuleAgeTooSmall   = errors.New("rollup rule age must not be smaller than block size")
 )
+
+// RollupRuleOptions represents a single rollup rule.
+type RollupRuleOptions struct {
+	resolution time.Duration
+	age        time.Duration
+}
+
+// Resolution returns the resolution for the rollup rule.
+func (r *RollupRuleOptions) Resolution() time.Duration {
+	return r.resolution
+}
+
+// SetResolution sets the resolution for the rollup rule.
+func (r *RollupRuleOptions) SetResolution(value time.Duration) RollupRuleOptions {
+	r.resolution = value
+	return r
+}
+
+// Age returns the age for the rollup rule.
+func (r *RollupRuleOptions) Age() time.Duration {
+	return r.age
+}
+
+// SetAge sets the age for the rollup rule.
+func (r *RollupRuleOptions) SetAge(value time.Duration) RollupRuleOptions {
+	r.age = value
+	return r
+}
+
+// Equal checks if two RollupRuleOptions are equal.
+func (r *RollupRuleOptions) Equal(other RollupRuleOptions) bool {
+	if r == nil && other == nil {
+		return true
+	}
+	if r == nil || other == nil {
+		return false
+	}
+	// Type assert 'other' to the concrete type *RollupRuleOptions
+	otherConcrete, ok := other.(*RollupRuleOptions)
+	if !ok {
+		// This should ideally not happen if used correctly
+		return false
+	}
+	return r.resolution == otherConcrete.resolution && r.age == otherConcrete.age
+}
 
 type options struct {
 	retentionPeriod                  time.Duration
@@ -68,6 +117,7 @@ type options struct {
 	bufferPast                       time.Duration
 	dataExpiryAfterNotAccessedPeriod time.Duration
 	dataExpiry                       bool
+	rollupRules                      []RollupRuleOptions
 }
 
 // NewOptions creates new retention options
@@ -80,6 +130,7 @@ func NewOptions() Options {
 		bufferPast:                       defaultBufferPast,
 		dataExpiry:                       defaultDataExpiry,
 		dataExpiryAfterNotAccessedPeriod: defaultDataExpiryAfterNotAccessedPeriod,
+		rollupRules:                      nil,
 	}
 }
 
@@ -102,10 +153,38 @@ func (o *options) Validate() error {
 	if o.retentionPeriod < o.blockSize {
 		return errRetentionPeriodTooSmall
 	}
+	for _, r := range o.rollupRules {
+		if r.age < o.blockSize {
+			return fmt.Errorf("%w: age %s, blocksize %s", errRollupRuleAgeTooSmall, r.age.String(), o.blockSize.String())
+		}
+		// Ensure resolution is a valid xtime.Unit
+		if _, err := xtime.ParseUnit(r.resolution.String()); err != nil {
+			return fmt.Errorf("invalid resolution %s: %w", r.resolution.String(), err)
+		}
+	}
 	return nil
 }
 
 func (o *options) Equal(value Options) bool {
+	if !o.equalSansRollupRules(value) {
+		return false
+	}
+	otherRollupRules := value.RollupRules()
+	if len(o.rollupRules) != len(otherRollupRules) {
+		return false
+	}
+	for i, r := range o.rollupRules {
+		// Need to cast r to *RollupRuleOptions before calling Equal method
+		// that expects a concrete type for comparison after type assertion.
+		// However, the Equal method on RollupRuleOptions interface takes RollupRuleOptions.
+		if !r.Equal(otherRollupRules[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (o *options) equalSansRollupRules(value Options) bool {
 	return o.retentionPeriod == value.RetentionPeriod() &&
 		o.futureRetentionPeriod == value.FutureRetentionPeriod() &&
 		o.blockSize == value.BlockSize() &&
@@ -183,4 +262,14 @@ func (o *options) SetBlockDataExpiryAfterNotAccessedPeriod(value time.Duration) 
 
 func (o *options) BlockDataExpiryAfterNotAccessedPeriod() time.Duration {
 	return o.dataExpiryAfterNotAccessedPeriod
+}
+
+func (o *options) SetRollupRules(value []RollupRuleOptions) Options {
+	opts := *o
+	opts.rollupRules = value
+	return &opts
+}
+
+func (o *options) RollupRules() []RollupRuleOptions {
+	return o.rollupRules
 }

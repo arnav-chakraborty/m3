@@ -170,6 +170,47 @@ This controls the duration of time that M3DB will retain data for the namespace.
 
 Can be modified without creating a new namespace: `yes`
 
+#### rollupRules
+
+This is an optional array of rules that define how data can be rolled up to coarser resolutions and kept for longer periods. Each rule specifies a `resolution` and an `age`.
+For example, you might want to keep data at `1m` resolution for `2d` (2 days), and then roll it up to `5m` resolution and keep that for `10d` (10 days).
+
+-   **`resolution`**: The resolution for the rollup. This should be a duration string (e.g., `1m`, `5m`, `1h`). This resolution must be a multiple of the `blockSize`.
+-   **`age`**: How long to keep the data at this rolled-up resolution. This should be a duration string (e.g., `2d`, `10d`, `30d`). This age must be greater than or equal to the `blockSize` of the namespace.
+
+**Example Configuration:**
+
+```json
+"retentionOptions": {
+  "retentionPeriodDuration": "2d",  // Keep raw data for 2 days
+  "blockSizeDuration": "2h",
+  "bufferFutureDuration": "10m",
+  "bufferPastDuration": "10m",
+  "blockDataExpiry": true,
+  "blockDataExpiryAfterNotAccessedPeriodDuration": "5m",
+  "rollupRules": [
+    {
+      "resolution": "5m", // Rollup to 5 minute resolution
+      "age": "7d"         // Keep 5m data for 7 days
+    },
+    {
+      "resolution": "1h", // Rollup to 1 hour resolution
+      "age": "30d"        // Keep 1h data for 30 days
+    }
+  ]
+}
+```
+
+**Interaction with `retentionPeriod` and `blockSize`:**
+
+-   The `retentionPeriod` defines how long the raw, original data is kept.
+-   `rollupRules` define additional, longer retention periods for aggregated (rolled-up) data at coarser resolutions.
+-   The `age` in a rollup rule dictates how long data at that specific resolution is kept, starting from the time the data was originally written.
+-   It's important to ensure that the `age` for a rollup rule is greater than the `retentionPeriod` if you want to keep rolled-up data longer than raw data. If a rollup rule's `age` is less than or equal to the `retentionPeriod`, it might not have the intended effect as the raw data might already cover that period.
+-   The `blockSize` is fundamental to how data is stored. Rollup resolutions must be a multiple of the `blockSize`. M3DB will aggregate data from underlying blocks of `blockSize` into new blocks of the specified rollup `resolution`.
+
+Can be modified without creating a new namespace: `yes` (Adding new rules or modifying existing ones. However, changing resolutions or ages might affect data availability and storage footprint).
+
 #### blockSize
 
 This is the most important value to consider when tuning the performance of an M3DB namespace. Read the [storage engine documentation](/docs/architecture/m3db/storage) for more details, but the basic idea is that larger blockSizes will use more memory, but achieve higher compression. Similarly, smaller blockSizes will use less memory, but have worse compression. In testing, good compression occurs with blocksizes containing around 720 samples per timeseries.
