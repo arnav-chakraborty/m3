@@ -237,6 +237,35 @@ type DBConfiguration struct {
 	// ForceColdWritesEnabled will force enable cold writes for all namespaces
 	// if set.
 	ForceColdWritesEnabled *bool `yaml:"forceColdWritesEnabled"`
+
+	// GRPC configuration for the gRPC server.
+	GRPC *GRPCConfiguration `yaml:"grpc,omitempty"`
+	// GRPCCluster configuration for the gRPC cluster server.
+	GRPCCluster *GRPCConfiguration `yaml:"grpcCluster,omitempty"`
+}
+
+// GRPCConfiguration is the configuration for the gRPC server.
+type GRPCConfiguration struct {
+	// Enabled specifies whether the gRPC server is enabled.
+	Enabled bool `yaml:"enabled"`
+	// ListenAddress is the address the gRPC server will listen on.
+	ListenAddress string `yaml:"listenAddress"`
+	// TODO: Add TLSConfiguration if/when TLS support is added.
+	// TLS *config.TLSConfiguration `yaml:"tls"`
+}
+
+// DefaultGRPCListenAddress is the default listen address for the gRPC server.
+const DefaultGRPCListenAddress = "0.0.0.0:9090"
+// DefaultGRPCClusterListenAddress is the default listen address for the gRPC cluster server.
+const DefaultGRPCClusterListenAddress = "0.0.0.0:9091"
+
+
+// ListenAddressOrDefault returns the gRPC listen address or a default.
+func (c *GRPCConfiguration) ListenAddressOrDefault() string {
+	if c.ListenAddress == "" {
+		return DefaultGRPCListenAddress
+	}
+	return c.ListenAddress
 }
 
 // LoggingOrDefault returns the logging configuration or defaults.
@@ -246,6 +275,40 @@ func (c *DBConfiguration) LoggingOrDefault() xlog.Configuration {
 	}
 
 	return *c.Logging
+}
+
+// GRPCOrDefault returns the GRPC configuration or a default if not specified.
+func (c *DBConfiguration) GRPCOrDefault() GRPCConfiguration {
+	if c.GRPC == nil {
+		// Return a default configuration (e.g., disabled by default)
+		return GRPCConfiguration{
+			Enabled:       false,
+			ListenAddress: DefaultGRPCListenAddress,
+		}
+	}
+	// If section exists but address is empty, apply default for address.
+	cfg := *c.GRPC
+	if cfg.ListenAddress == "" {
+		cfg.ListenAddress = DefaultGRPCListenAddress
+	}
+	return cfg
+}
+
+// GRPCClusterOrDefault returns the GRPC Cluster configuration or a default if not specified.
+func (c *DBConfiguration) GRPCClusterOrDefault() GRPCConfiguration {
+	if c.GRPCCluster == nil {
+		// Return a default configuration (e.g., disabled by default)
+		return GRPCConfiguration{
+			Enabled:       false,
+			ListenAddress: DefaultGRPCClusterListenAddress,
+		}
+	}
+	// If section exists but address is empty, apply default for address.
+	cfg := *c.GRPCCluster
+	if cfg.ListenAddress == "" {
+		cfg.ListenAddress = DefaultGRPCClusterListenAddress
+	}
+	return cfg
 }
 
 // MetricsOrDefault returns metrics configuration or defaults.

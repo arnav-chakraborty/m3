@@ -1,0 +1,554 @@
+syntax = "proto3";
+
+package rpc;
+
+option go_package = "github.com/m3db/m3/src/dbnode/generated/proto/rpc";
+
+import "google/protobuf/empty.proto";
+
+enum TimeType {
+  UNIX_SECONDS = 0;
+  UNIX_MICROSECONDS = 1;
+  UNIX_MILLISECONDS = 2;
+  UNIX_NANOSECONDS = 3;
+}
+
+enum ErrorType {
+  INTERNAL_ERROR = 0;
+  BAD_REQUEST = 1;
+}
+
+enum ErrorFlags {
+  NONE = 0;
+  RESOURCE_EXHAUSTED = 1;
+  SERVER_TIMEOUT = 2;
+}
+
+message Error {
+  ErrorType type = 1;
+  string message = 2;
+  int64 flags = 3;
+}
+
+message Datapoint {
+  int64 timestamp = 1;
+  double value = 2;
+  bytes annotation = 3;
+  TimeType timestamp_time_type = 4;
+}
+
+message Tag {
+  string name = 1;
+  string value = 2;
+}
+
+message FetchRequest {
+  int64 range_start = 1;
+  int64 range_end = 2;
+  string name_space = 3;
+  string id = 4;
+  TimeType range_type = 5;
+  TimeType result_time_type = 6;
+  bytes source = 7;
+}
+
+message FetchResult {
+  repeated Datapoint datapoints = 1;
+}
+
+message WriteRequest {
+  string name_space = 1;
+  string id = 2;
+  Datapoint datapoint = 3;
+}
+
+message WriteTaggedRequest {
+  string name_space = 1;
+  string id = 2;
+  repeated Tag tags = 3;
+  Datapoint datapoint = 4;
+}
+
+message WriteBatchRawError {
+  int64 index = 1;
+  Error err = 2;
+}
+
+message TruncateRequest {
+  bytes name_space = 1;
+}
+
+message TruncateResult {
+  int64 num_series = 1;
+}
+
+message NodeHealthResult {
+  bool ok = 1;
+  string status = 2;
+  bool bootstrapped = 3;
+  map<string, string> metadata = 4;
+}
+
+message NodeBootstrappedResult {}
+
+message NodeBootstrappedInPlacementOrNoPlacementResult {}
+
+message NodePersistRateLimitResult {
+  bool limit_enabled = 1;
+  double limit_mbps = 2;
+  int64 limit_check_every = 3;
+}
+
+message NodeSetPersistRateLimitRequest {
+  bool limit_enabled = 1;
+  double limit_mbps = 2;
+  int64 limit_check_every = 3;
+}
+
+message NodeWriteNewSeriesAsyncResult {
+  bool write_new_series_async = 1;
+}
+
+message NodeSetWriteNewSeriesAsyncRequest {
+  bool write_new_series_async = 1;
+}
+
+message NodeWriteNewSeriesBackoffDurationResult {
+  int64 write_new_series_backoff_duration = 1;
+  TimeType duration_type = 2;
+}
+
+message NodeSetWriteNewSeriesBackoffDurationRequest {
+  int64 write_new_series_backoff_duration = 1;
+  TimeType duration_type = 2;
+}
+
+message NodeWriteNewSeriesLimitPerShardPerSecondResult {
+  int64 write_new_series_limit_per_shard_per_second = 1;
+}
+
+message NodeSetWriteNewSeriesLimitPerShardPerSecondRequest {
+  int64 write_new_series_limit_per_shard_per_second = 1;
+}
+
+message FetchBatchRawRequest {
+  int64 range_start = 1;
+  int64 range_end = 2;
+  bytes name_space = 3;
+  repeated bytes ids = 4;
+  TimeType range_time_type = 5;
+  bytes source = 6;
+}
+
+message FetchBatchRawV2Request {
+  repeated bytes name_spaces = 1;
+  repeated FetchBatchRawV2RequestElement elements = 2;
+  bytes source = 3;
+}
+
+message FetchBatchRawV2RequestElement {
+  int64 name_space = 1;
+  int64 range_start = 2;
+  int64 range_end = 3;
+  bytes id = 4;
+  TimeType range_time_type = 5;
+}
+
+message FetchBatchRawResult {
+  repeated FetchRawResult elements = 1;
+}
+
+message FetchRawResult {
+  repeated Segments segments = 1;
+  Error err = 2;
+}
+
+message Segments {
+  Segment merged = 1;
+  repeated Segment unmerged = 2;
+}
+
+message Segment {
+  bytes head = 1;
+  bytes tail = 2;
+  int64 start_time = 3;
+  int64 block_size = 4;
+  int64 checksum = 5;
+}
+
+message FetchTaggedRequest {
+  bytes name_space = 1;
+  bytes query = 2;
+  int64 range_start = 3;
+  int64 range_end = 4;
+  bool fetch_data = 5;
+  int64 series_limit = 6;
+  TimeType range_time_type = 7;
+  bool require_exhaustive = 8;
+  int64 docs_limit = 9;
+  bytes source = 10;
+  bool require_no_wait = 11;
+}
+
+message FetchTaggedResult {
+  repeated FetchTaggedIDResult elements = 1;
+  bool exhaustive = 2;
+  int64 waited_index = 3;
+  int64 waited_series_read = 4;
+}
+
+message FetchTaggedIDResult {
+  bytes id = 1;
+  bytes name_space = 2;
+  bytes encoded_tags = 3;
+  repeated Segments segments = 4;
+  Error err = 5; // Deprecated
+}
+
+message FetchBlocksRawRequest {
+  bytes name_space = 1;
+  int32 shard = 2;
+  repeated FetchBlocksRawRequestElement elements = 3;
+  bytes source = 4;
+}
+
+message FetchBlocksRawRequestElement {
+  bytes id = 1;
+  repeated int64 starts = 2;
+}
+
+message FetchBlocksRawResult {
+  repeated Blocks elements = 1;
+}
+
+message Blocks {
+  bytes id = 1;
+  repeated Block blocks = 2;
+}
+
+message Block {
+  int64 start = 1;
+  Segments segments = 2;
+  Error err = 3;
+  int64 checksum = 4;
+}
+
+message FetchBlocksMetadataRawV2Request {
+  bytes name_space = 1;
+  int32 shard = 2;
+  int64 range_start = 3;
+  int64 range_end = 4;
+  int64 limit = 5;
+  bytes page_token = 6;
+  bool include_sizes = 7;
+  bool include_checksums = 8;
+  bool include_last_read = 9;
+}
+
+message FetchBlocksMetadataRawV2Result {
+  repeated BlockMetadataV2 elements = 1;
+  bytes next_page_token = 2;
+}
+
+message BlockMetadataV2 {
+  bytes id = 1;
+  int64 start = 2;
+  Error err = 3;
+  int64 size = 4;
+  int64 checksum = 5;
+  int64 last_read = 6;
+  TimeType last_read_time_type = 7;
+  bytes encoded_tags = 8;
+}
+
+message WriteBatchRawRequest {
+  bytes name_space = 1;
+  repeated WriteBatchRawRequestElement elements = 2;
+}
+
+message WriteBatchRawV2Request {
+  repeated bytes name_spaces = 1;
+  repeated WriteBatchRawV2RequestElement elements = 2;
+}
+
+message WriteBatchRawRequestElement {
+  bytes id = 1;
+  Datapoint datapoint = 2;
+}
+
+message WriteBatchRawV2RequestElement {
+  bytes id = 1;
+  Datapoint datapoint = 2;
+  int64 name_space = 3;
+}
+
+message WriteTaggedBatchRawRequest {
+  bytes name_space = 1;
+  repeated WriteTaggedBatchRawRequestElement elements = 2;
+}
+
+message WriteTaggedBatchRawV2Request {
+  repeated bytes name_spaces = 1;
+  repeated WriteTaggedBatchRawV2RequestElement elements = 2;
+}
+
+message WriteTaggedBatchRawRequestElement {
+  bytes id = 1;
+  bytes encoded_tags = 2;
+  Datapoint datapoint = 3;
+}
+
+message WriteTaggedBatchRawV2RequestElement {
+  bytes id = 1;
+  bytes encoded_tags = 2;
+  Datapoint datapoint = 3;
+  int64 name_space = 4;
+}
+
+message HealthResult {
+  bool ok = 1;
+  string status = 2;
+}
+
+enum AggregateQueryType {
+  AGGREGATE_BY_TAG_NAME = 0;
+  AGGREGATE_BY_TAG_NAME_VALUE = 1;
+}
+
+message AggregateQueryRawRequest {
+  bytes query = 1;
+  int64 range_start = 2;
+  int64 range_end = 3;
+  bytes name_space = 4;
+  int64 series_limit = 5;
+  repeated bytes tag_name_filter = 6;
+  AggregateQueryType aggregate_query_type = 7;
+  TimeType range_type = 8;
+  bytes source = 9;
+  int64 docs_limit = 10;
+  bool require_exhaustive = 11;
+  bool require_no_wait = 12;
+}
+
+message AggregateQueryRawResult {
+  repeated AggregateQueryRawResultTagNameElement results = 1;
+  bool exhaustive = 2;
+  int64 waited_index = 3;
+}
+
+message AggregateQueryRawResultTagNameElement {
+  bytes tag_name = 1;
+  repeated AggregateQueryRawResultTagValueElement tag_values = 2;
+}
+
+message AggregateQueryRawResultTagValueElement {
+  bytes tag_value = 1;
+}
+
+message AggregateQueryRequest {
+  Query query = 1;
+  int64 range_start = 2;
+  int64 range_end = 3;
+  string name_space = 4;
+  int64 series_limit = 5;
+  repeated string tag_name_filter = 6;
+  AggregateQueryType aggregate_query_type = 7;
+  TimeType range_type = 8;
+  bytes source = 9;
+  int64 docs_limit = 10;
+  bool require_exhaustive = 11;
+  bool require_no_wait = 12;
+}
+
+message AggregateQueryResult {
+  repeated AggregateQueryResultTagNameElement results = 1;
+  bool exhaustive = 2;
+}
+
+message AggregateQueryResultTagNameElement {
+  string tag_name = 1;
+  repeated AggregateQueryResultTagValueElement tag_values = 2;
+}
+
+message AggregateQueryResultTagValueElement {
+  string tag_value = 1;
+}
+
+message QueryRequest {
+  Query query = 1;
+  int64 range_start = 2;
+  int64 range_end = 3;
+  string name_space = 4;
+  int64 limit = 5;
+  bool no_data = 6;
+  TimeType range_type = 7;
+  TimeType result_time_type = 8;
+  bytes source = 9;
+  ClusterQueryOptions cluster_options = 10;
+}
+
+message ClusterQueryOptions {
+  ReadConsistency read_consistency = 1;
+  EqualTimestampStrategy conflict_resolution_strategy = 2;
+}
+
+enum ReadConsistency {
+  ONE = 0;
+  UNSTRICT_MAJORITY = 1;
+  MAJORITY = 2;
+  UNSTRICT_ALL = 3;
+  ALL = 4;
+}
+
+enum EqualTimestampStrategy {
+  LAST_PUSHED = 0;
+  HIGHEST_VALUE = 1;
+  LOWEST_VALUE = 2;
+  HIGHEST_FREQUENCY = 3;
+}
+
+message QueryResult {
+  repeated QueryResultElement results = 1;
+  bool exhaustive = 2;
+}
+
+message QueryResultElement {
+  string id = 1;
+  repeated Tag tags = 2;
+  repeated Datapoint datapoints = 3;
+}
+
+message TermQuery {
+  string field = 1;
+  string term = 2;
+}
+
+message RegexpQuery {
+  string field = 1;
+  string regexp = 2;
+}
+
+message NegationQuery {
+  Query query = 1;
+}
+
+message ConjunctionQuery {
+  repeated Query queries = 1;
+}
+
+message DisjunctionQuery {
+  repeated Query queries = 1;
+}
+
+message AllQuery {}
+
+message FieldQuery {
+  string field = 1;
+}
+
+message Query {
+  oneof query {
+    TermQuery term = 1;
+    RegexpQuery regexp = 2;
+    NegationQuery negation = 3;
+    ConjunctionQuery conjunction = 4;
+    DisjunctionQuery disjunction = 5;
+    AllQuery all = 6;
+    FieldQuery field = 7;
+  }
+}
+
+message AggregateTilesRequest {
+  string source_namespace = 1;
+  string target_namespace = 2;
+  int64 range_start = 3;
+  int64 range_end = 4;
+  string step = 5;
+  TimeType range_type = 6;
+}
+
+message AggregateTilesResult {
+  int64 processed_tile_count = 1;
+}
+
+message DebugProfileStartRequest {
+  string name = 1;
+  string file_path_template = 2;
+  string interval = 3;
+  string duration = 4;
+  int64 debug = 5;
+  int64 conditional_num_goroutines_greater_than = 6;
+  int64 conditional_num_goroutines_less_than = 7;
+  bool conditional_is_overloaded = 8;
+}
+
+message DebugProfileStartResult {}
+
+message DebugProfileStopRequest {
+  string name = 1;
+}
+
+message DebugProfileStopResult {}
+
+message DebugIndexMemorySegmentsRequest {
+  string directory = 1;
+}
+
+message DebugIndexMemorySegmentsResult {}
+
+message WriteBatchRawErrors {
+  repeated WriteBatchRawError errors = 1;
+}
+
+service Node {
+  // Friendly not highly performant read/write endpoints
+  rpc Query(QueryRequest) returns (QueryResult);
+  rpc Aggregate(AggregateQueryRequest) returns (AggregateQueryResult);
+  rpc Fetch(FetchRequest) returns (FetchResult);
+  rpc Write(WriteRequest) returns (google.protobuf.Empty);
+  rpc WriteTagged(WriteTaggedRequest) returns (google.protobuf.Empty);
+
+  // Performant read/write endpoints
+  rpc AggregateRaw(AggregateQueryRawRequest) returns (AggregateQueryRawResult);
+  rpc FetchBatchRaw(FetchBatchRawRequest) returns (FetchBatchRawResult);
+  rpc FetchBatchRawV2(FetchBatchRawV2Request) returns (FetchBatchRawResult);
+  rpc FetchBlocksRaw(FetchBlocksRawRequest) returns (FetchBlocksRawResult);
+  rpc FetchTagged(FetchTaggedRequest) returns (FetchTaggedResult);
+  rpc FetchBlocksMetadataRawV2(FetchBlocksMetadataRawV2Request) returns (FetchBlocksMetadataRawV2Result);
+  rpc WriteBatchRaw(WriteBatchRawRequest) returns (google.protobuf.Empty);
+  rpc WriteBatchRawV2(WriteBatchRawV2Request) returns (google.protobuf.Empty);
+  rpc WriteTaggedBatchRaw(WriteTaggedBatchRawRequest) returns (google.protobuf.Empty);
+  rpc WriteTaggedBatchRawV2(WriteTaggedBatchRawV2Request) returns (google.protobuf.Empty);
+  rpc Repair(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc Truncate(TruncateRequest) returns (TruncateResult);
+
+  rpc AggregateTiles(AggregateTilesRequest) returns (AggregateTilesResult);
+
+  // Management endpoints
+  rpc Health(google.protobuf.Empty) returns (NodeHealthResult);
+  rpc Bootstrapped(google.protobuf.Empty) returns (NodeBootstrappedResult);
+  rpc BootstrappedInPlacementOrNoPlacement(google.protobuf.Empty) returns (NodeBootstrappedInPlacementOrNoPlacementResult);
+  rpc GetPersistRateLimit(google.protobuf.Empty) returns (NodePersistRateLimitResult);
+  rpc SetPersistRateLimit(NodeSetPersistRateLimitRequest) returns (NodePersistRateLimitResult);
+  rpc GetWriteNewSeriesAsync(google.protobuf.Empty) returns (NodeWriteNewSeriesAsyncResult);
+  rpc SetWriteNewSeriesAsync(NodeSetWriteNewSeriesAsyncRequest) returns (NodeWriteNewSeriesAsyncResult);
+  rpc GetWriteNewSeriesBackoffDuration(google.protobuf.Empty) returns (NodeWriteNewSeriesBackoffDurationResult);
+  rpc SetWriteNewSeriesBackoffDuration(NodeSetWriteNewSeriesBackoffDurationRequest) returns (NodeWriteNewSeriesBackoffDurationResult);
+  rpc GetWriteNewSeriesLimitPerShardPerSecond(google.protobuf.Empty) returns (NodeWriteNewSeriesLimitPerShardPerSecondResult);
+  rpc SetWriteNewSeriesLimitPerShardPerSecond(NodeSetWriteNewSeriesLimitPerShardPerSecondRequest) returns (NodeWriteNewSeriesLimitPerShardPerSecondResult);
+
+  // Debug endpoints
+  rpc DebugProfileStart(DebugProfileStartRequest) returns (DebugProfileStartResult);
+  rpc DebugProfileStop(DebugProfileStopRequest) returns (DebugProfileStopResult);
+  rpc DebugIndexMemorySegments(DebugIndexMemorySegmentsRequest) returns (DebugIndexMemorySegmentsResult);
+}
+
+service Cluster {
+  rpc Health(google.protobuf.Empty) returns (HealthResult);
+  rpc Write(WriteRequest) returns (google.protobuf.Empty);
+  rpc WriteTagged(WriteTaggedRequest) returns (google.protobuf.Empty);
+  rpc Query(QueryRequest) returns (QueryResult);
+  rpc Aggregate(AggregateQueryRequest) returns (AggregateQueryResult);
+  rpc Fetch(FetchRequest) returns (FetchResult);
+  rpc Truncate(TruncateRequest) returns (TruncateResult);
+}

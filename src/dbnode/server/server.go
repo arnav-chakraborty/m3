@@ -61,11 +61,19 @@ import (
 	"github.com/m3db/m3/src/dbnode/environment"
 	"github.com/m3db/m3/src/dbnode/kvconfig"
 	"github.com/m3db/m3/src/dbnode/namespace"
+	"net"
+
+	"google.golang.org/grpc"
+
 	hjcluster "github.com/m3db/m3/src/dbnode/network/server/httpjson/cluster"
 	hjnode "github.com/m3db/m3/src/dbnode/network/server/httpjson/node"
+	grpcclusterserver "github.com/m3db/m3/src/dbnode/network/server/grpc/cluster"
+	grpcnodeserver "github.com/m3db/m3/src/dbnode/network/server/grpc/node"
 	"github.com/m3db/m3/src/dbnode/network/server/tchannelthrift"
 	ttcluster "github.com/m3db/m3/src/dbnode/network/server/tchannelthrift/cluster"
 	ttnode "github.com/m3db/m3/src/dbnode/network/server/tchannelthrift/node"
+
+	"github.com/m3db/m3/src/dbnode/generated/proto/rpc"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/dbnode/persist/fs/commitlog"
 	"github.com/m3db/m3/src/dbnode/ratelimit"
@@ -1024,8 +1032,10 @@ func Run(runOpts RunOptions) {
 	opts = opts.SetBootstrapProcessProvider(bs)
 
 	// Start the cluster services now that the M3DB client is available.
+	tchannelClusterService := ttcluster.NewService(m3dbClient) // Create the TChannel cluster service logic
+
 	clusterListenAddress := cfg.ClusterListenAddressOrDefault()
-	tchannelthriftClusterClose, err := ttcluster.NewServer(m3dbClient,
+	tchannelthriftClusterClose, err := ttcluster.NewServer(tchannelClusterService, // Pass the service logic
 		clusterListenAddress, contextPool, tchannelOpts).ListenAndServe()
 	if err != nil {
 		logger.Fatal("could not open tchannelthrift interface",
@@ -1035,7 +1045,7 @@ func Run(runOpts RunOptions) {
 	logger.Info("cluster tchannelthrift: listening", zap.String("address", clusterListenAddress))
 
 	httpClusterListenAddress := cfg.HTTPClusterListenAddressOrDefault()
-	httpjsonClusterClose, err := hjcluster.NewServer(m3dbClient,
+	httpjsonClusterClose, err := hjcluster.NewServer(tchannelClusterService, // Pass the service logic
 		httpClusterListenAddress, contextPool, nil).ListenAndServe()
 	if err != nil {
 		logger.Fatal("could not open httpjson interface",
@@ -1043,6 +1053,46 @@ func Run(runOpts RunOptions) {
 	}
 	defer httpjsonClusterClose()
 	logger.Info("cluster httpjson: listening", zap.String("address", httpClusterListenAddress))
+
+	// Start the gRPC Cluster server
+	grpcClusterCfg := cfg.GRPCClusterOrDefault()
+	var grpcClusterServer *grpc.Server
+	var grpcClusterListener net.Listener
+	var grpcClusterServerClose func() error
+
+	if grpcClusterCfg.Enabled {
+		logger.Info("starting gRPC Cluster server")
+		grpcClusterListenAddr := grpcClusterCfg.ListenAddressOrDefault()
+
+		grpcClusterSvc, err := grpcclusterserver.NewClusterServer(tchannelClusterService) // Pass the TChannel service logic
+		if err != nil {
+			logger.Fatal("could not create gRPC Cluster service", zap.Error(err))
+		}
+
+		listener, err := net.Listen("tcp", grpcClusterListenAddr)
+		if err != nil {
+			logger.Fatal("could not listen on gRPC Cluster address",
+				zap.String("address", grpcClusterListenAddr), zap.Error(err))
+		}
+		grpcClusterListener = listener
+
+		server := grpc.NewServer() // Add options here if needed
+		rpc.RegisterClusterServer(server, grpcClusterSvc)
+		grpcClusterServer = server
+
+		logger.Info("gRPC Cluster server: listening", zap.String("address", grpcClusterListenAddr))
+		go func() {
+			if serveErr := server.Serve(listener); serveErr != nil && serveErr != grpc.ErrServerStopped {
+				logger.Error("gRPC Cluster server failed to serve", zap.Error(serveErr))
+			}
+		}()
+		grpcClusterServerClose = func() error {
+			grpcClusterServer.GracefulStop()
+			logger.Info("gRPC Cluster server: stopped")
+			return nil
+		}
+		defer grpcClusterServerClose() // Ensure it's closed on exit
+	}
 
 	// Initialize clustered database.
 	clusterTopoWatch, err := topo.Watch()
@@ -1069,6 +1119,46 @@ func Run(runOpts RunOptions) {
 
 	// Now that we've initialized the database we can set it on the service.
 	service.SetDatabase(db)
+
+	// Start the gRPC Node server
+	grpcNodeCfg := cfg.GRPCOrDefault()
+	var grpcNodeServer *grpc.Server
+	var grpcNodeListener net.Listener
+	var grpcNodeServerClose func() error
+
+	if grpcNodeCfg.Enabled {
+		logger.Info("starting gRPC Node server")
+		grpcNodeListenAddress := grpcNodeCfg.ListenAddressOrDefault()
+
+		grpcNodeSvc, err := grpcnodeserver.NewNodeServer(service)
+		if err != nil {
+			logger.Fatal("could not create gRPC Node service", zap.Error(err))
+		}
+
+		listener, err := net.Listen("tcp", grpcNodeListenAddress)
+		if err != nil {
+			logger.Fatal("could not listen on gRPC Node address",
+				zap.String("address", grpcNodeListenAddress), zap.Error(err))
+		}
+		grpcNodeListener = listener
+
+		grpcServer := grpc.NewServer() // Add options here if needed (interceptors, TLS)
+		rpc.RegisterNodeServer(grpcServer, grpcNodeSvc)
+		grpcNodeServer = grpcServer
+
+		logger.Info("gRPC Node server: listening", zap.String("address", grpcNodeListenAddress))
+		go func() {
+			if serveErr := grpcServer.Serve(listener); serveErr != nil && serveErr != grpc.ErrServerStopped {
+				logger.Error("gRPC Node server failed to serve", zap.Error(serveErr))
+			}
+		}()
+		grpcNodeServerClose = func() error {
+			grpcNodeServer.GracefulStop() // This will also close the listener
+			logger.Info("gRPC Node server: stopped")
+			return nil
+		}
+		defer grpcNodeServerClose() // Ensure it's closed on exit
+	}
 
 	go func() {
 		if runOpts.BootstrapCh != nil {
@@ -1113,6 +1203,17 @@ func Run(runOpts RunOptions) {
 	// Attempt graceful server close.
 	closedCh := make(chan struct{})
 	go func() {
+		// Stop gRPC server first if it was started
+		if grpcNodeServerClose != nil {
+			// The defer for grpcNodeServerClose will handle this on normal exit,
+			// but explicit call here ensures it's part of the graceful shutdown sequence
+			// if this goroutine finishes before the main defer stack unwinds.
+			// However, GracefulStop is blocking, so it might be better to trigger it
+			// and wait alongside db.Terminate().
+			// For now, relying on the defer. If more complex shutdown ordering is needed,
+			// this might need a more elaborate shutdown manager.
+		}
+
 		err := db.Terminate()
 		if err != nil {
 			logger.Error("close database error", zap.Error(err))

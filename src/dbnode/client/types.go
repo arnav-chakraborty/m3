@@ -29,7 +29,8 @@ import (
 
 	"github.com/m3db/m3/src/cluster/shard"
 	"github.com/m3db/m3/src/dbnode/encoding"
-	"github.com/m3db/m3/src/dbnode/generated/thrift/rpc"
+	thriftrpc "github.com/m3db/m3/src/dbnode/generated/thrift/rpc" // Alias for thrift rpc
+	grpcrpc "github.com/m3db/m3/src/dbnode/generated/proto/rpc"    // Alias for grpc proto rpc
 	"github.com/m3db/m3/src/dbnode/namespace"
 	"github.com/m3db/m3/src/dbnode/runtime"
 	"github.com/m3db/m3/src/dbnode/storage/block"
@@ -145,6 +146,73 @@ type Session interface {
 
 	// Close the session
 	Close() error
+
+	// WriteGRPC value to the database for an ID using gRPC.
+	WriteGRPC(
+		namespace ident.ID,
+		id ident.ID,
+		t xtime.UnixNano,
+		value float64,
+		unit xtime.Unit,
+		annotation []byte,
+	) error
+
+	// WriteTaggedGRPC value to the database for an ID and given tags using gRPC.
+	WriteTaggedGRPC(
+		namespace ident.ID,
+		id ident.ID,
+		tags ident.TagIterator,
+		t xtime.UnixNano,
+		value float64,
+		unit xtime.Unit,
+		annotation []byte,
+	) error
+
+	// FetchGRPC values from the database for an ID using gRPC.
+	FetchGRPC(
+		namespace ident.ID,
+		id ident.ID,
+		startInclusive xtime.UnixNano,
+		endExclusive xtime.UnixNano,
+	) (encoding.SeriesIterator, error)
+
+	// FetchIDsGRPC values from the database for a set of IDs using gRPC.
+	FetchIDsGRPC(
+		namespace ident.ID,
+		ids ident.Iterator,
+		startInclusive xtime.UnixNano,
+		endExclusive xtime.UnixNano,
+	) (encoding.SeriesIterators, error)
+
+	// WriteBatchRawGRPC writes a batch of raw datapoints using gRPC.
+	// opts are options for this specific batch write.
+	WriteBatchRawGRPC(namespace ident.ID, writes ts.BatchWriter, opts WriteBatchOptions) error
+
+	// WriteTaggedBatchRawGRPC writes a batch of raw tagged datapoints using gRPC.
+	// opts are options for this specific batch write.
+	WriteTaggedBatchRawGRPC(namespace ident.ID, writes ts.TaggedBatchWriter, opts WriteBatchOptions) error
+
+	// FetchTaggedIDsGRPC resolves the provided query to known IDs using gRPC.
+	FetchTaggedIDsGRPC(
+		ctx gocontext.Context,
+		namespace ident.ID,
+		query index.Query,
+		opts index.QueryOptions,
+	) (TaggedIDsIterator, FetchResponseMetadata, error)
+
+	// AggregateGRPC performs a tagged query and aggregates the results using gRPC.
+	AggregateGRPC(
+		ctx gocontext.Context,
+		namespace ident.ID,
+		query index.Query,
+		opts index.AggregationOptions,
+	) (AggregatedTagsIterator, FetchResponseMetadata, error)
+}
+
+// WriteBatchOptions provides options for a batch write.
+// TODO: Define this struct if it has specific fields. For now, it's a placeholder.
+type WriteBatchOptions struct {
+	// Example: Size int // The size of the batch, if applicable for pre-sizing or specific batch options.
 }
 
 // FetchResponseMetadata is metadata about a fetch response.
@@ -309,7 +377,10 @@ type AdminSession interface {
 	DedicatedConnection(
 		shardID uint32,
 		opts DedicatedConnectionOptions,
-	) (rpc.TChanNode, Channel, error)
+	) (thriftrpc.TChanNode, Channel, error) // Corrected to thriftrpc
+
+	// HealthGRPC performs a health check against a specific host using gRPC.
+	HealthGRPC(ctx gocontext.Context, host topology.Host) (*grpcrpc.NodeHealthResult, error) // Corrected to grpcrpc
 }
 
 // BorrowConnectionOptions are options to use when borrowing a connection
@@ -331,7 +402,7 @@ type BorrowConnectionsResult struct {
 type WithBorrowConnectionFn func(
 	shard shard.Shard,
 	host topology.Host,
-	client rpc.TChanNode,
+	client thriftrpc.TChanNode, // Corrected to thriftrpc
 	channel Channel,
 ) (WithBorrowConnectionResult, error)
 
@@ -739,6 +810,23 @@ type Options interface {
 
 	// ThriftContextFn returns the retrier for streaming blocks.
 	ThriftContextFn() ThriftContextFn
+
+	// SetGRPCClientConfig sets the gRPC client configuration.
+	SetGRPCClientConfig(*GRPCClientConfiguration) Options
+	// GRPCClientConfig returns the gRPC client configuration.
+	GRPCClientConfig() *GRPCClientConfiguration
+	// SetGRPCDialOptions sets the gRPC dial options.
+	SetGRPCDialOptions([]grpc.DialOption) Options
+	// GRPCDialOptions returns the gRPC dial options.
+	GRPCDialOptions() []grpc.DialOption
+	// SetGRPCServiceOverride sets the gRPC service name override.
+	SetGRPCServiceOverride(string) Options
+	// GRPCServiceOverride returns the gRPC service name override.
+	GRPCServiceOverride() string
+	// SetGRPCTargetResolver sets the gRPC target resolver.
+	SetGRPCTargetResolver(GRPCTargetResolver) Options
+	// GRPCTargetResolver returns the gRPC target resolver.
+	GRPCTargetResolver() GRPCTargetResolver
 }
 
 // ThriftContextFn turns a context into a thrift context for a thrift call.

@@ -130,6 +130,67 @@ type Configuration struct {
 
 	// IterateEqualTimestampStrategy specifies the iterate equal timestamp strategy.
 	IterateEqualTimestampStrategy *encoding.IterateEqualTimestampStrategy `yaml:"iterateEqualTimestampStrategy"`
+
+	// GRPC is the gRPC client configuration.
+	GRPC *GRPCClientConfiguration `yaml:"grpc,omitempty"`
+}
+
+// GRPCClientConfiguration is the configuration for the gRPC client.
+type GRPCClientConfiguration struct {
+	// Enabled specifies whether the gRPC client communication should be enabled for applicable operations.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// DefaultNodeTargetAddresses is a list of initial gRPC addresses for nodes.
+	// These might be used if topology-based discovery for gRPC endpoints is not yet in place
+	// or as a fallback. Format should be "host:port".
+	DefaultNodeTargetAddresses []string `yaml:"defaultNodeTargetAddresses,omitempty"`
+	// DialTimeout is the timeout for establishing a gRPC connection.
+	DialTimeout time.Duration `yaml:"dialTimeout,omitempty"`
+	// NodeHealthCheckTimeout is the timeout for a gRPC health check to a node.
+	NodeHealthCheckTimeout time.Duration `yaml:"nodeHealthCheckTimeout,omitempty"`
+	// TODO: Add fields for TLS, keepalive, interceptors, etc. as needed.
+}
+
+const (
+	defaultGRPCClientEnabled              = false
+	defaultGRPCClientDialTimeout          = 5 * time.Second
+	defaultGRPCClientNodeHealthCheckTimeout = 2 * time.Second
+)
+
+// GRPCOrDefault returns the GRPCClientConfiguration or a default if not specified.
+func (c *Configuration) GRPCOrDefault() *GRPCClientConfiguration {
+	if c.GRPC == nil {
+		return &GRPCClientConfiguration{
+			Enabled:                defaultGRPCClientEnabled,
+			DialTimeout:            defaultGRPCClientDialTimeout,
+			NodeHealthCheckTimeout: defaultGRPCClientNodeHealthCheckTimeout,
+		}
+	}
+	cfg := *c.GRPC
+	if cfg.DialTimeout == 0 {
+		cfg.DialTimeout = defaultGRPCClientDialTimeout
+	}
+	if cfg.NodeHealthCheckTimeout == 0 {
+		cfg.NodeHealthCheckTimeout = defaultGRPCClientNodeHealthCheckTimeout
+	}
+	// Enabled defaults to false (zero value for bool) if not set, which is fine.
+	// DefaultNodeTargetAddresses defaults to empty slice if not set, which is fine.
+	return &cfg
+}
+
+// NodeHealthCheckTimeoutOrDefault returns the NodeHealthCheckTimeout or a default.
+func (c *GRPCClientConfiguration) NodeHealthCheckTimeoutOrDefault() time.Duration {
+	if c.NodeHealthCheckTimeout <= 0 {
+		return defaultGRPCClientNodeHealthCheckTimeout
+	}
+	return c.NodeHealthCheckTimeout
+}
+
+// DialTimeoutOrDefault returns the DialTimeout or a default.
+func (c *GRPCClientConfiguration) DialTimeoutOrDefault() time.Duration {
+	if c.DialTimeout <= 0 {
+		return defaultGRPCClientDialTimeout
+	}
+	return c.DialTimeout
 }
 
 // ProtoConfiguration is the configuration for running with ProtoDataMode enabled.
@@ -471,6 +532,9 @@ func (c Configuration) NewAdminClient(
 
 	// Cast to admin options to apply admin config options.
 	opts := v.(AdminOptions)
+
+	// Set GRPC client configuration
+	opts = opts.SetGRPCClientConfig(c.GRPCOrDefault())
 
 	if c.WriteTimestampOffset != nil {
 		opts = opts.SetWriteTimestampOffset(*c.WriteTimestampOffset)

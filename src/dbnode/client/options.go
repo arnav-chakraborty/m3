@@ -49,6 +49,8 @@ import (
 	"github.com/m3db/m3/src/x/sampler"
 	"github.com/m3db/m3/src/x/serialize"
 	xsync "github.com/m3db/m3/src/x/sync"
+
+	"google.golang.org/grpc"
 )
 
 const (
@@ -179,6 +181,9 @@ const (
 	// defaultHostQueueWorkerPoolKillProbability is the default host queue worker pool
 	// kill probability.
 	defaultHostQueueWorkerPoolKillProbability = 0.01
+
+	// defaultGRPCDialOptions are default gRPC dial options (empty slice).
+	defaultGRPCDialOptions []grpc.DialOption
 )
 
 var (
@@ -301,6 +306,12 @@ type options struct {
 	writeTimestampOffset                                time.Duration
 	namespaceInitializer                                namespace.Initializer
 	thriftContextFn                                     ThriftContextFn
+
+	// gRPC specific fields
+	grpcClientConfig    *GRPCClientConfiguration
+	grpcDialOptions     []grpc.DialOption
+	grpcServiceOverride string
+	grpcTargetResolver  GRPCTargetResolver
 }
 
 // NewOptions creates a new set of client options with defaults
@@ -452,7 +463,10 @@ func newOptions() *options {
 		asyncWriteMaxConcurrency:              defaultAsyncWriteMaxConcurrency,
 		useV2BatchAPIs:                        defaultUseV2BatchAPIs,
 		thriftContextFn:                       defaultThriftContextFn,
+		grpcDialOptions:                       defaultGRPCDialOptions, // Initialize with default (empty slice)
 	}
+	// GRPCClientConfig will be set by NewAdminClient from the overall Configuration.
+	// GRPCTargetResolver can be set by users or defaulted in session.Open().
 	return opts.SetEncodingM3TSZ().(*options)
 }
 
@@ -1187,4 +1201,58 @@ func (o *options) SetThriftContextFn(value ThriftContextFn) Options {
 
 func (o *options) ThriftContextFn() ThriftContextFn {
 	return o.thriftContextFn
+}
+
+// GRPCTargetResolver resolves a topology host to a gRPC target address string.
+type GRPCTargetResolver interface {
+	// Resolve resolves a topology host to a gRPC target address.
+	Resolve(host topology.Host) (string, error)
+}
+
+// --- gRPC Client Options ---
+
+func (o *options) SetGRPCClientConfig(value *GRPCClientConfiguration) Options {
+	opts := *o
+	opts.grpcClientConfig = value
+	return &opts
+}
+
+func (o *options) GRPCClientConfig() *GRPCClientConfiguration {
+	if o.grpcClientConfig == nil {
+		return &GRPCClientConfiguration{Enabled: false, DialTimeout: defaultGRPCClientDialTimeout, NodeHealthCheckTimeout: defaultGRPCClientNodeHealthCheckTimeout}
+	}
+	return o.grpcClientConfig
+}
+
+func (o *options) SetGRPCDialOptions(value []grpc.DialOption) Options {
+	opts := *o
+	opts.grpcDialOptions = value
+	return &opts
+}
+
+func (o *options) GRPCDialOptions() []grpc.DialOption {
+	if o.grpcDialOptions == nil {
+		return defaultGRPCDialOptions
+	}
+	return o.grpcDialOptions
+}
+
+func (o *options) SetGRPCServiceOverride(value string) Options {
+	opts := *o
+	opts.grpcServiceOverride = value
+	return &opts
+}
+
+func (o *options) GRPCServiceOverride() string {
+	return o.grpcServiceOverride
+}
+
+func (o *options) SetGRPCTargetResolver(value GRPCTargetResolver) Options {
+	opts := *o
+	opts.grpcTargetResolver = value
+	return &opts
+}
+
+func (o *options) GRPCTargetResolver() GRPCTargetResolver {
+	return o.grpcTargetResolver
 }
