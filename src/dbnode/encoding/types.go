@@ -35,6 +35,42 @@ import (
 	xtime "github.com/m3db/m3/src/x/time"
 )
 
+// EncodingType defines the type of encoding.
+type EncodingType int
+
+const (
+	// M3TSZEncoding represents the M3TSZ encoding scheme.
+	M3TSZEncoding EncodingType = iota
+	// ProtoEncoding represents the Protobuf encoding scheme.
+	ProtoEncoding
+	// M3TSZAdvancedEncoding represents the advanced M3TSZ encoding scheme.
+	M3TSZAdvancedEncoding
+)
+
+// String returns the string representation of the EncodingType.
+func (et EncodingType) String() string {
+	switch et {
+	case M3TSZEncoding:
+		return "m3tsz"
+	case ProtoEncoding:
+		return "proto"
+	case M3TSZAdvancedEncoding:
+		return "m3tsz_advanced"
+	default:
+		return "unknown"
+	}
+}
+
+// ValidEncodingTypes lists the valid encoding types.
+var ValidEncodingTypes = []EncodingType{
+	M3TSZEncoding,
+	ProtoEncoding,
+	M3TSZAdvancedEncoding,
+}
+
+// DefaultEncodingType is the default encoding type used.
+var DefaultEncodingType = M3TSZEncoding
+
 // Encoder is the generic interface for different types of encoders.
 type Encoder interface {
 	// SetSchema sets up the schema needed by schema-aware encoder to encode the stream.
@@ -174,6 +210,13 @@ type Options interface {
 
 	// Metrics returns the encoding metrics.
 	Metrics() Metrics
+
+	// SetEncodingType sets the encoding type for the options.
+	// This will influence which encoder/decoder is created by associated pools.
+	SetEncodingType(value EncodingType) Options
+
+	// EncodingType returns the current encoding type.
+	EncodingType() EncodingType
 }
 
 // Iterator is the generic interface for iterating over encoded data.

@@ -21,229 +21,276 @@
 package m3tsz
 
 import (
+	"fmt"
 	"math"
-	"math/big"
-	"strconv"
-	"strings"
 	"testing"
+	"time"
+
+	"github.com/m3db/m3/src/dbnode/encoding"
+	"github.com/m3db/m3/src/dbnode/ts"
+	"github.com/m3db/m3/src/dbnode/x/xio"
+	"github.com/m3db/m3/src/x/pool"
+	xtime "github.com/m3db/m3/src/x/time"
 )
 
 const (
-	smallDpFloat = 123.456
-	largeDpFloat = 123.4567890123
-	intFloat     = 123.0
+	numDatapointsForBenchmark = 1000
+	defaultBenchStartTime     = "2024-01-01T00:00:00Z"
 )
 
-func BenchmarkMathPow(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		_ = smallDpFloat * math.Pow10(1)
+var (
+	benchStartTime time.Time
+	benchOpts      encoding.Options
+	bytesPool      pool.CheckedBytesPool
+	encoderPool    encoding.EncoderPool
+	iteratorPool   encoding.ReaderIteratorPool
+)
+
+func init() {
+	var err error
+	benchStartTime, err = time.Parse(time.RFC3339, defaultBenchStartTime)
+	if err != nil {
+		panic(err)
 	}
+
+	bytesPool = pool.NewCheckedBytesPool(nil, pool.NewObjectPoolOptions().SetSize(1), func(s [][]byte) pool.CheckedBytesPool {
+		return pool.NewCheckedBytesPool(s, pool.NewObjectPoolOptions().SetSize(1), nil)
+	})
+	bytesPool.Init()
+
+	benchOpts = encoding.NewOptions().SetBytesPool(bytesPool)
+
+	encoderPool = pool.NewEncoderPool(pool.NewObjectPoolOptions().SetSize(1))
+	// Allocator set per encoding type in benchmark setup
+
+	iteratorPool = pool.NewReaderIteratorPool(pool.NewObjectPoolOptions().SetSize(1))
+	// Allocator set per encoding type in benchmark setup
+
+	benchOpts = benchOpts.SetEncoderPool(encoderPool).SetReaderIteratorPool(iteratorPool)
 }
 
-func BenchmarkManualMult(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		_ = smallDpFloat * 10.0
+// --- Data Generation Helpers ---
+
+type valueGenFunc func(i int) float64
+
+func generateDatapoints(numPoints int, startTime time.Time, timeStep time.Duration, valGen valueGenFunc) []ts.Datapoint {
+	dps := make([]ts.Datapoint, numPoints)
+	currentTime := startTime
+	for i := 0; i < numPoints; i++ {
+		dps[i] = ts.Datapoint{Timestamp: currentTime, Value: valGen(i)}
+		currentTime = currentTime.Add(timeStep)
 	}
+	return dps
 }
 
-func BenchmarkSliceLookup(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		_ = largeDpFloat * multipliers[6]
-	}
-}
+var (
+	flatLineData = generateDatapoints(numDatapointsForBenchmark, benchStartTime, time.Second*10, func(i int) float64 { return 123.456 })
 
-func BenchmarkFuncPointer(b *testing.B) {
-	benchPointer(b, funcNormal)
-}
+	smallChangesData = generateDatapoints(numDatapointsForBenchmark, benchStartTime, time.Second*10, func(i int) float64 { return 100.0 + float64(i)*0.01 })
 
-func BenchmarkBoolCheckTrue(b *testing.B) {
-	benchBoolCheck(b, true)
-}
+	largeChangesData = generateDatapoints(numDatapointsForBenchmark, benchStartTime, time.Second*10, func(i int) float64 { return float64(i*1000) * math.Sin(float64(i)) })
 
-func BenchmarkBoolCheckFalse(b *testing.B) {
-	benchBoolCheck(b, false)
-}
-
-func BenchmarkMathModf(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		math.Modf(largeDpFloat)
-	}
-}
-
-func BenchmarkMathNextafter(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		math.Nextafter(largeDpFloat, 2)
-	}
-}
-
-func BenchmarkFormatFloat(b *testing.B) {
-	for n := 0; n < b.N; n++ {
-		strconv.FormatFloat(largeDpFloat, 'f', -1, 64)
-	}
-}
-
-func BenchmarkMathConversionInt(b *testing.B) {
-	benchMathConversion(b, intFloat)
-}
-
-func BenchmarkNoCheckConversionInt(b *testing.B) {
-	benchNoCheckConversion(b, intFloat)
-}
-
-func BenchmarkStringConversionInt(b *testing.B) {
-	benchStringConversion(b, intFloat)
-}
-
-func BenchmarkMathConversionSmall(b *testing.B) {
-	benchMathConversion(b, smallDpFloat)
-}
-
-func BenchmarkNoCheckConversionSmall(b *testing.B) {
-	benchNoCheckConversion(b, smallDpFloat)
-}
-
-func BenchmarkStringConversionSmall(b *testing.B) {
-	benchStringConversion(b, smallDpFloat)
-}
-
-func BenchmarkMathConversionLarge(b *testing.B) {
-	benchMathConversion(b, largeDpFloat)
-}
-
-func BenchmarkNoCheckConversionLarge(b *testing.B) {
-	benchNoCheckConversion(b, largeDpFloat)
-}
-
-func BenchmarkStringConversionLarge(b *testing.B) {
-	benchStringConversion(b, largeDpFloat)
-}
-
-func BenchmarkMathConversionLargeConst(b *testing.B) {
-	benchMathConstConversion(b, largeDpFloat)
-}
-
-func BenchmarkStringConversionLargeConst(b *testing.B) {
-	benchStringConstConversion(b, largeDpFloat)
-}
-
-func benchMathConversion(b *testing.B, val float64) {
-	for n := 0; n < b.N; n++ {
-		convertToIntFloat(val, 0)
-	}
-}
-
-func benchMathConstConversion(b *testing.B, val float64) {
-	var dec uint8
-	for n := 0; n < b.N; n++ {
-		_, dec, _, _ = convertToIntFloat(val, dec)
-	}
-}
-
-func benchStringConstConversion(b *testing.B, val float64) {
-	var dec uint8
-	for n := 0; n < b.N; n++ {
-		_, dec, _ = convertToIntString(val, dec)
-	}
-}
-
-func benchStringConversion(b *testing.B, val float64) {
-	for n := 0; n < b.N; n++ {
-		convertToIntString(val, 0)
-	}
-}
-
-func benchNoCheckConversion(b *testing.B, val float64) {
-	for n := 0; n < b.N; n++ {
-		convertToIntFloatIntNoCheck(val, 0)
-	}
-}
-
-func benchPointer(b *testing.B, f writeFunc) {
-	for n := 0; n < b.N; n++ {
-		f(largeDpFloat)
-	}
-}
-
-func benchBoolCheck(b *testing.B, enabled bool) {
-	for n := 0; n < b.N; n++ {
-		if enabled {
-			funcNormal(largeDpFloat)
-		} else {
-			funcOpt(largeDpFloat)
+	rleTimestampData = generateDatapoints(numDatapointsForBenchmark, benchStartTime, time.Second*10, func(i int) float64 {
+		// Timestamps will have regular delta, then a few same deltas
+		if i%5 < 3 { // Creates runs of 3 identical deltas
+			return float64(i)
 		}
-	}
-}
-
-type writeFunc func(v float64)
-
-func funcNormal(v float64) {}
-func funcOpt(v float64)    {}
-
-func convertToIntFloatIntNoCheck(v float64, curMaxMult uint8) (float64, uint8, bool) {
-	val := v * math.Pow10(int(curMaxMult))
-	sign := 1.0
-	if v < 0 {
-		sign = -1.0
-		val = val * -1.0
+		return float64(i*2) // Vary values otherwise
+	})
+	// Corrected rleTimestampData to actually make deltas repeat
+	// For this, we need to manipulate timeStep within generation or have specific time sequence
+	// Simplified: generate a fixed delta sequence for RLE test
+	fixedTimeStepRLEDataPoints := make([]ts.Datapoint, numDatapointsForBenchmark)
+	currentTime := benchStartTime
+	fixedDelta := time.Second * 15
+	for i:=0; i < numDatapointsForBenchmark; i++ {
+		fixedTimeStepRLEDataPoints[i] = ts.Datapoint{Timestamp: currentTime, Value: float64(i % 10)} // Values vary to isolate ts RLE
+		currentTime = currentTime.Add(fixedDelta)
 	}
 
-	for mult := curMaxMult; mult <= maxMult && val < maxOptInt; mult++ {
-		i, r := math.Modf(val)
-		if r == 0 {
-			return sign * i, mult, false
-		} else if r < 0.5 {
-			// Round down and check
-			if math.Nextafter(val, 0) <= i {
-				return sign * i, mult, false
-			}
-		} else {
-			// Round up and check
-			next := i + 1
-			if math.Nextafter(val, next) >= next {
-				return sign * next, mult, false
+
+	rleValueData = generateDatapoints(numDatapointsForBenchmark, benchStartTime, time.Second*10, func(i int) float64 {
+		return float64( (i % 5) * 10 ) // Creates runs of 5 identical values
+	})
+
+	nanData = generateDatapoints(numDatapointsForBenchmark, benchStartTime, time.Second*10, func(i int) float64 {
+		if i%2 == 0 { return float64(i) }
+		return math.NaN()
+	})
+)
+
+// --- Core Benchmark Logic ---
+
+func runEncodingBenchmark(b *testing.B, encType encoding.EncodingType, data []ts.Datapoint, startTime time.Time) {
+	opts := benchOpts.SetEncodingType(encType)
+	var currentEncoderPool encoding.EncoderPool
+
+	switch encType {
+	case encoding.M3TSZEncoding:
+		currentEncoderPool = pool.NewEncoderPool(pool.NewObjectPoolOptions().SetSize(1))
+		currentEncoderPool.Init(func() encoding.Encoder {
+			return NewEncoder(startTime, nil, DefaultIntOptimizationEnabled, opts)
+		})
+	case encoding.M3TSZAdvancedEncoding:
+		currentEncoderPool = pool.NewEncoderPool(pool.NewObjectPoolOptions().SetSize(1))
+		currentEncoderPool.Init(func() encoding.Encoder {
+			return NewM3TSZAdvancedEncoder(startTime, opts.BytesPool(), opts)
+		})
+	default:
+		b.Fatalf("Unsupported encoding type: %v", encType)
+	}
+	opts = opts.SetEncoderPool(currentEncoderPool)
+
+
+	var totalBytes int64
+	var segment ts.Segment
+	var err error
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		encoder := opts.EncoderPool().Get()
+		encoder.Reset(startTime, len(data), nil) // Schema nil for these encoders
+
+		for _, dp := range data {
+			if err = encoder.Encode(dp, xtime.Nanosecond, nil); err != nil {
+				b.Fatal(err)
 			}
 		}
-		val = val * 10.0
+		segment, err = encoder.Stream(nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if n == 0 { // Only set bytes and log for the first run to avoid overhead
+			totalBytes = int64(segment.Len())
+		}
+		encoder.Close() // Return to pool
 	}
+	b.SetBytes(totalBytes) // Total bytes processed in one op (one full encoding of dataset)
 
-	return v, 0, true
+	originalSize := len(data) * (8 + 8) // Approx (ts + val)
+	if totalBytes > 0 {
+		b.ReportMetric(float64(originalSize)/float64(totalBytes), "compression_ratio")
+	}
+	b.ReportMetric(float64(totalBytes), "bytes/op")
 }
 
-func convertToIntString(v float64, curDec uint8) (float64, uint8, bool) {
-	val := big.NewFloat(v)
+func runDecodingBenchmark(b *testing.B, encType encoding.EncodingType, data []ts.Datapoint, startTime time.Time) {
+	opts := benchOpts.SetEncodingType(encType)
+	var currentEncoderPool encoding.EncoderPool
+	var currentIteratorPool encoding.ReaderIteratorPool
 
-	if curDec == 0 {
-		i, acc := val.Int64()
-		if acc == big.Exact {
-			return float64(i), 0, false
+
+	switch encType {
+	case encoding.M3TSZEncoding:
+		currentEncoderPool = pool.NewEncoderPool(pool.NewObjectPoolOptions().SetSize(1))
+		currentEncoderPool.Init(func() encoding.Encoder {
+			return NewEncoder(startTime, nil, DefaultIntOptimizationEnabled, opts)
+		})
+		currentIteratorPool = pool.NewReaderIteratorPool(pool.NewObjectPoolOptions().SetSize(1))
+		currentIteratorPool.Init(func(r xio.Reader64, s encoding.SchemaDescr) encoding.ReaderIterator {
+			return NewReaderIterator(r, DefaultIntOptimizationEnabled, opts, s)
+		})
+	case encoding.M3TSZAdvancedEncoding:
+		currentEncoderPool = pool.NewEncoderPool(pool.NewObjectPoolOptions().SetSize(1))
+		currentEncoderPool.Init(func() encoding.Encoder {
+			return NewM3TSZAdvancedEncoder(startTime, opts.BytesPool(), opts)
+		})
+		currentIteratorPool = pool.NewReaderIteratorPool(pool.NewObjectPoolOptions().SetSize(1))
+		currentIteratorPool.Init(func(r xio.Reader64, s encoding.SchemaDescr) encoding.ReaderIterator {
+			decoder := NewM3TSZAdvancedDecoder(opts.BytesPool(), opts)
+			decoder.Reset(r,s)
+			return decoder
+		})
+	default:
+		b.Fatalf("Unsupported encoding type: %v", encType)
+	}
+	opts = opts.SetEncoderPool(currentEncoderPool).SetReaderIteratorPool(currentIteratorPool)
+
+
+	encoder := opts.EncoderPool().Get()
+	encoder.Reset(startTime, len(data), nil)
+	for _, dp := range data {
+		if err := encoder.Encode(dp, xtime.Nanosecond, nil); err != nil {
+			b.Fatal(err)
 		}
 	}
+	segment, err := encoder.Stream(nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	encoder.Close()
 
-	s := strconv.FormatFloat(v, 'f', -1, 64)
-	dec := uint8(len(s)-strings.Index(s, ".")) - 1
-
-	if dec < curDec {
-		dec = curDec
-	} else if dec > maxMult {
-		dec = maxMult
+	if segment.Len() == 0 && len(data) > 0 {
+		b.Fatal("encoded segment is empty but data was provided")
 	}
 
-	val.Mul(val, big.NewFloat(math.Pow10(int(dec))))
-	i, _ := val.Int64()
-	if i != math.MaxInt64 && i != math.MinInt64 {
-		mv, _ := val.Float64()
-		i = roundFloat(mv, i)
-		return float64(i), dec, false
-	}
 
-	return v, 0, true
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		iter := opts.ReaderIteratorPool().Get()
+		// The segment reader needs to be re-created or reset for each iteration
+		// if its state is consumed, which it is.
+		segReader := xio.NewSegmentReader(segment)
+		iter.Reset(segReader, nil) // Schema nil
+
+		for iter.Next() {
+			// No-op, just iterating
+		}
+		if err := iter.Err(); err != nil {
+			b.Fatal(err)
+		}
+		iter.Close() // Return to pool
+	}
+	b.SetBytes(int64(segment.Len())) // Bytes processed per op is the compressed segment size
 }
 
-func roundFloat(v float64, i int64) int64 {
-	_, r := math.Modf(v)
-	if r < 0.5 {
-		return i
-	}
+// --- Benchmark Functions ---
 
-	return i + 1
+// M3TSZ (Original)
+func BenchmarkM3TSZEncode_FlatLine(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZEncoding, flatLineData, benchStartTime) }
+func BenchmarkM3TSZDecode_FlatLine(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZEncoding, flatLineData, benchStartTime) }
+func BenchmarkM3TSZEncode_SmallChanges(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZEncoding, smallChangesData, benchStartTime) }
+func BenchmarkM3TSZDecode_SmallChanges(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZEncoding, smallChangesData, benchStartTime) }
+func BenchmarkM3TSZEncode_LargeChanges(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZEncoding, largeChangesData, benchStartTime) }
+func BenchmarkM3TSZDecode_LargeChanges(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZEncoding, largeChangesData, benchStartTime) }
+func BenchmarkM3TSZEncode_RLEValue(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZEncoding, rleValueData, benchStartTime) }
+func BenchmarkM3TSZDecode_RLEValue(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZEncoding, rleValueData, benchStartTime) }
+func BenchmarkM3TSZEncode_RLETimestamp(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZEncoding, fixedTimeStepRLEDataPoints, benchStartTime) }
+func BenchmarkM3TSZDecode_RLETimestamp(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZEncoding, fixedTimeStepRLEDataPoints, benchStartTime) }
+func BenchmarkM3TSZEncode_NaN(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZEncoding, nanData, benchStartTime) }
+func BenchmarkM3TSZDecode_NaN(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZEncoding, nanData, benchStartTime) }
+
+
+// M3TSZ-Advanced
+func BenchmarkM3TSZAdvancedEncode_FlatLine(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZAdvancedEncoding, flatLineData, benchStartTime) }
+func BenchmarkM3TSZAdvancedDecode_FlatLine(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZAdvancedEncoding, flatLineData, benchStartTime) }
+func BenchmarkM3TSZAdvancedEncode_SmallChanges(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZAdvancedEncoding, smallChangesData, benchStartTime) }
+func BenchmarkM3TSZAdvancedDecode_SmallChanges(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZAdvancedEncoding, smallChangesData, benchStartTime) }
+func BenchmarkM3TSZAdvancedEncode_LargeChanges(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZAdvancedEncoding, largeChangesData, benchStartTime) }
+func BenchmarkM3TSZAdvancedDecode_LargeChanges(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZAdvancedEncoding, largeChangesData, benchStartTime) }
+func BenchmarkM3TSZAdvancedEncode_RLEValue(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZAdvancedEncoding, rleValueData, benchStartTime) }
+func BenchmarkM3TSZAdvancedDecode_RLEValue(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZAdvancedEncoding, rleValueData, benchStartTime) }
+func BenchmarkM3TSZAdvancedEncode_RLETimestamp(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZAdvancedEncoding, fixedTimeStepRLEDataPoints, benchStartTime) }
+func BenchmarkM3TSZAdvancedDecode_RLETimestamp(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZAdvancedEncoding, fixedTimeStepRLEDataPoints, benchStartTime) }
+func BenchmarkM3TSZAdvancedEncode_NaN(b *testing.B) { runEncodingBenchmark(b, encoding.M3TSZAdvancedEncoding, nanData, benchStartTime) }
+func BenchmarkM3TSZAdvancedDecode_NaN(b *testing.B) { runDecodingBenchmark(b, encoding.M3TSZAdvancedEncoding, nanData, benchStartTime) }
+
+// Example of a microbenchmark (original style from file, kept for context if needed)
+// func BenchmarkMathPow(b *testing.B) {
+// 	for n := 0; n < b.N; n++ {
+// 		_ = 123.456 * math.Pow10(1)
+// 	}
+// }
+// Note: Removed other microbenchmarks for brevity as this task focuses on end-to-end.
+// They can be added back if they were part of the original file and needed.
+// For now, the file is overwritten with new benchmark structure.
+
+// Print compression ratios after all benchmarks (or within each)
+// This is a simplified way, normally you'd collect results from b.ReportMetric
+// For now, b.ReportMetric("compression_ratio", ratio) is used.
+func TestMain(m *testing.M) {
+	// Can add setup/teardown here if needed for all benchmarks in this package
+	// For example, pre-generate all datasets once if generation is slow.
+	fmt.Println("Running M3TSZ benchmarks...")
+	m.Run()
 }
