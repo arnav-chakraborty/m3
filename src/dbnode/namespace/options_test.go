@@ -119,6 +119,100 @@ func TestOptionsValidate(t *testing.T) {
 	require.Error(t, o1.Validate())
 }
 
+func TestRollupOptionsValidate(t *testing.T) {
+	// Valid options
+	roValid := NewRollupOptions().SetResolution(time.Hour).SetNewTTL(24 * time.Hour)
+	require.NoError(t, roValid.Validate())
+
+	// Invalid: zero resolution
+	roZeroRes := NewRollupOptions().SetResolution(0).SetNewTTL(24 * time.Hour)
+	err := roZeroRes.Validate()
+	require.Error(t, err)
+	require.Equal(t, errRollupResolutionPositive, err)
+
+	// Invalid: negative resolution
+	roNegRes := NewRollupOptions().SetResolution(-1 * time.Hour).SetNewTTL(24 * time.Hour)
+	err = roNegRes.Validate()
+	require.Error(t, err)
+	require.Equal(t, errRollupResolutionPositive, err)
+
+	// Invalid: zero newTTL
+	roZeroTTL := NewRollupOptions().SetResolution(time.Hour).SetNewTTL(0)
+	err = roZeroTTL.Validate()
+	require.Error(t, err)
+	require.Equal(t, errRollupNewTTLPositive, err)
+
+	// Invalid: negative newTTL
+	roNegTTL := NewRollupOptions().SetResolution(time.Hour).SetNewTTL(-24 * time.Hour)
+	err = roNegTTL.Validate()
+	require.Error(t, err)
+	require.Equal(t, errRollupNewTTLPositive, err)
+}
+
+func TestOptionsEqualsRollupOptions(t *testing.T) {
+	// Base options
+	o1 := NewOptions()
+
+	// Options with rollup
+	ro1 := NewRollupOptions().SetResolution(time.Hour).SetNewTTL(24 * time.Hour)
+	o2 := o1.SetRollupOptions(ro1)
+
+	// Options with different rollup
+	ro2 := NewRollupOptions().SetResolution(2 * time.Hour).SetNewTTL(48 * time.Hour)
+	o3 := o1.SetRollupOptions(ro2)
+
+	// Options with nil rollup again (same as o1)
+	o4 := o2.SetRollupOptions(nil)
+
+	require.True(t, o1.Equal(o1)) // Self
+	require.True(t, o2.Equal(o2)) // Self with rollup
+
+	require.False(t, o1.Equal(o2)) // o1 (nil rollup) vs o2 (rollup1)
+	require.False(t, o2.Equal(o1)) // o2 (rollup1) vs o1 (nil rollup)
+
+	require.False(t, o2.Equal(o3)) // o2 (rollup1) vs o3 (rollup2)
+	require.False(t, o3.Equal(o2)) // o3 (rollup2) vs o2 (rollup1)
+
+	require.True(t, o1.Equal(o4))  // o1 (nil rollup) vs o4 (nil rollup)
+	require.True(t, o4.Equal(o1))  // o4 (nil rollup) vs o1 (nil rollup)
+
+	// Compare two different RollupOptions instances with same values
+	ro1Clone := NewRollupOptions().SetResolution(time.Hour).SetNewTTL(24 * time.Hour)
+	o2Clone := o1.SetRollupOptions(ro1Clone)
+	require.True(t, o2.Equal(o2Clone))
+	require.True(t, o2Clone.Equal(o2))
+}
+
+func TestOptionsValidateCallsRollupValidate(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	rOpts := retention.NewMockOptions(ctrl)
+	iOpts := NewMockIndexOptions(ctrl)
+	mockRollupOpts := NewMockRollupOptions(ctrl)
+
+	// Base options, valid state for retention and index
+	rOpts.EXPECT().Validate().Return(nil).AnyTimes()
+	iOpts.EXPECT().Enabled().Return(false).AnyTimes() // Simplest path for main options validate
+
+	// Case 1: No rollup options, should be valid
+	opts1 := NewOptions().SetRetentionOptions(rOpts).SetIndexOptions(iOpts)
+	require.NoError(t, opts1.Validate())
+
+	// Case 2: Valid rollup options
+	opts2 := opts1.SetRollupOptions(mockRollupOpts)
+	mockRollupOpts.EXPECT().Validate().Return(nil)
+	require.NoError(t, opts2.Validate())
+
+	// Case 3: Invalid rollup options
+	opts3 := opts1.SetRollupOptions(mockRollupOpts)
+	expectedErr := fmt.Errorf("rollup validation error")
+	mockRollupOpts.EXPECT().Validate().Return(expectedErr)
+	err := opts3.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid rollup options: rollup validation error")
+}
+
 func TestOptionsValidateWithExtendedOptions(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()

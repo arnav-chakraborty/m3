@@ -332,6 +332,9 @@ func NewFileSetFile(id FileSetFileIdentifier, filePathPrefix string) FileSetFile
 	}
 }
 
+// RollupDirName is the name of the directory that contains rollup files.
+const RollupDirName = "rollup"
+
 func openFiles(opener fileOpener, fds map[string]**os.File) error {
 	var firstErr error
 	for filePath, fdPtr := range fds {
@@ -1142,6 +1145,18 @@ func DeleteFileSetAt(
 func DataFileSetsBefore(
 	filePathPrefix string, namespace ident.ID, shard uint32, t xtime.UnixNano,
 ) ([]string, error) {
+	expiredVolumes, err := ExpiredDataFileSets(filePathPrefix, namespace, shard, t)
+	if err != nil {
+		return nil, err
+	}
+	return expiredVolumes.Filepaths(), nil
+}
+
+// ExpiredDataFileSets returns all the flush data fileset volumes whose
+// timestamps are earlier than a given time.
+func ExpiredDataFileSets(
+	filePathPrefix string, namespace ident.ID, shard uint32, earliestToRetain xtime.UnixNano,
+) (FileSetFilesSlice, error) {
 	matched, err := filesetFiles(filesetFilesSelector{
 		fileSetType:    persist.FileSetFlushType,
 		contentType:    persist.FileSetDataContentType,
@@ -1153,7 +1168,18 @@ func DataFileSetsBefore(
 	if err != nil {
 		return nil, err
 	}
-	return FilesBefore(matched.Filepaths(), t)
+	if matched == nil {
+		return nil, nil
+	}
+
+	expired := make(FileSetFilesSlice, 0, len(matched))
+	for _, fsFile := range matched {
+		// Ensure it's a complete fileset and actually before the retention time.
+		if fsFile.ID.BlockStart.Before(earliestToRetain) && fsFile.HasCompleteCheckpointFile() {
+			expired = append(expired, fsFile)
+		}
+	}
+	return expired, nil
 }
 
 // IndexFileSetsBefore returns all the flush index fileset paths whose timestamps are earlier than a given time.
@@ -1307,14 +1333,18 @@ func filesetFiles(args filesetFilesSelector) (FileSetFilesSlice, error) {
 		byTimeAsc sortedFilesetFiles
 		err       error
 	)
+	var baseDirForRollup string // Used to construct rollup paths if applicable
+
 	switch args.fileSetType {
 	case persist.FileSetFlushType:
 		switch args.contentType {
 		case persist.FileSetDataContentType:
 			dir := ShardDataDirPath(args.filePathPrefix, args.namespace, args.shard)
+			baseDirForRollup = dir // Rollups are under the shard data directory
 			byTimeAsc, err = findSortedFilesetFiles(dir, args.pattern, TimeAndVolumeIndexFromDataFileSetFilename)
 		case persist.FileSetIndexContentType:
 			dir := NamespaceIndexDataDirPath(args.filePathPrefix, args.namespace)
+			// No rollups for index files currently
 			byTimeAsc, err = findSortedFilesetFiles(dir, args.pattern, TimeAndVolumeIndexFromFileSetFilename)
 		default:
 			return nil, fmt.Errorf("unknown content type: %d", args.contentType)
@@ -1324,8 +1354,10 @@ func filesetFiles(args filesetFilesSelector) (FileSetFilesSlice, error) {
 		switch args.contentType {
 		case persist.FileSetDataContentType:
 			dir = ShardSnapshotsDirPath(args.filePathPrefix, args.namespace, args.shard)
+			// No rollups for snapshot files currently
 		case persist.FileSetIndexContentType:
 			dir = NamespaceIndexSnapshotDirPath(args.filePathPrefix, args.namespace)
+			// No rollups for index snapshot files currently
 		default:
 			return nil, fmt.Errorf("unknown content type: %d", args.contentType)
 		}
@@ -1335,6 +1367,37 @@ func filesetFiles(args filesetFilesSelector) (FileSetFilesSlice, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Discover rollup files if applicable (data filesets of type flush)
+	if args.fileSetType == persist.FileSetFlushType && args.contentType == persist.FileSetDataContentType && baseDirForRollup != "" {
+		rollupBaseDir := filepath.Join(baseDirForRollup, RollupDirName)
+		resolutionDirs, err := os.ReadDir(rollupBaseDir)
+		if err == nil { // if rollupBaseDir doesn't exist or no perms, err will be non-nil
+			for _, resDirEntry := range resolutionDirs {
+				if !resDirEntry.IsDir() {
+					continue
+				}
+				resolutionPath := filepath.Join(rollupBaseDir, resDirEntry.Name())
+				// Use TimeAndVolumeIndexFromDataFileSetFilename as rollup files follow same naming for data
+				rollupFiles, err := findSortedFilesetFiles(resolutionPath, args.pattern, TimeAndVolumeIndexFromDataFileSetFilename)
+				if err == nil && len(rollupFiles) > 0 {
+					if byTimeAsc == nil {
+						byTimeAsc = make(sortedFilesetFiles, 0)
+					}
+					byTimeAsc = append(byTimeAsc, rollupFiles...)
+				}
+				// TODO: log error if findSortedFilesetFiles for a resolutionPath fails?
+			}
+			// Re-sort if rollup files were added
+			if len(byTimeAsc) > 0 {
+				sort.Sort(byTimeAsc)
+			}
+		} else if !os.IsNotExist(err) {
+			// Log error if ReadDir failed for a reason other than NotExist
+			// Consider how to get a logger here if necessary, or return the error.
+			// For now, let's assume if rollup dir is problematic, we proceed with what we have.
+		}
 	}
 
 	if len(byTimeAsc) == 0 {
@@ -1743,6 +1806,111 @@ func filesetPathFromTimeLegacy(prefix string, t xtime.UnixNano, suffix string) s
 func FilesetPathFromTimeAndIndex(prefix string, t xtime.UnixNano, index int, suffix string) string {
 	return path.Join(prefix, filesetFileForTimeAndVolumeIndex(t, index, suffix))
 }
+
+// SeekClosestDataFileset seeks the data fileset for a given shard at a given time.
+// It returns the path to the fileset files, the volume index of the fileset,
+// the block size of the fileset, and an error if any.
+// If multiple filesets (e.g. original and rolled-up with different resolutions)
+// cover the searchTime, it prioritizes the one with the most granular resolution
+// (smallest block size).
+func SeekClosestDataFileset(
+	filePathPrefix string,
+	namespace ident.ID,
+	shard uint32,
+	searchTime xtime.UnixNano,
+	opts Options,
+) (string, int, time.Duration, error) {
+	// DataFiles will now return all filesets, including original and any/all rollup resolutions.
+	files, err := DataFiles(filePathPrefix, namespace, shard)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if len(files) == 0 {
+		return "", 0, 0, ErrFileNotFound
+	}
+
+	// Sort by block start descending, then volume index descending to check newest first.
+	sort.SliceStable(files, func(i, j int) bool {
+		if !files[i].ID.BlockStart.Equal(files[j].ID.BlockStart) {
+			return files[i].ID.BlockStart.After(files[j].ID.BlockStart)
+		}
+		return files[i].ID.VolumeIndex > files[j].ID.VolumeIndex
+	})
+
+	var candidates []struct {
+		file      FileSetFile
+		blockSize time.Duration
+	}
+
+	decoder := msgpack.NewDecoder(opts.DecodingOptions())
+	for _, file := range files {
+		if !file.HasCompleteCheckpointFile() {
+			continue
+		}
+
+		// Check if searchTime is within this fileset's potential range based on its BlockStart.
+		// We don't know the true BlockSize without reading the info file yet.
+		if file.ID.BlockStart.After(searchTime) {
+			continue // This fileset starts after our search time.
+		}
+
+		// Read info file to get actual block size and retention for this specific fileset
+		infoFilePath, ok := file.InfoFilePath()
+		if !ok {
+			continue // Should not happen if checkpoint is complete
+		}
+
+		infoBytes, err := read(infoFilePath)
+		if err != nil {
+			// Consider logging this error, but continue to allow other valid filesets
+			continue
+		}
+		decoder.Reset(msgpack.NewByteDecoderStream(infoBytes))
+		info, err := decoder.DecodeIndexInfo()
+		if err != nil {
+			// Consider logging
+			continue
+		}
+
+		blockSize := time.Duration(info.BlockSize)
+		if blockSize <= 0 {
+			// Invalid block size in info file, skip this fileset
+			continue
+		}
+
+		// Check if searchTime is within this specific fileset's actual time range
+		if searchTime < file.ID.BlockStart || searchTime >= file.ID.BlockStart.Add(blockSize) {
+			continue
+		}
+
+		// This file is a candidate
+		candidates = append(candidates, struct {
+			file      FileSetFile
+			blockSize time.Duration
+		}{file: file, blockSize: blockSize})
+	}
+
+	if len(candidates) == 0 {
+		return "", 0, 0, ErrFileNotFound
+	}
+
+	// Select the best candidate: smallest block size, then highest volume index.
+	best := candidates[0]
+	for i := 1; i < len(candidates); i++ {
+		if candidates[i].blockSize < best.blockSize {
+			best = candidates[i]
+		} else if candidates[i].blockSize == best.blockSize {
+			if candidates[i].file.ID.VolumeIndex > best.file.ID.VolumeIndex {
+				best = candidates[i]
+			}
+		}
+	}
+
+	// Return the info file path as the representative path for the fileset.
+	infoPath, _ := best.file.InfoFilePath()
+	return infoPath, best.file.ID.VolumeIndex, best.blockSize, nil
+}
+
 
 // isFirstVolumeLegacy returns whether the first volume of the provided type is
 // legacy, i.e. does not have a volume index in its filename. Using this

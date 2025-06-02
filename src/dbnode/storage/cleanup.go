@@ -30,9 +30,12 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/m3db/m3/src/dbnode/persist"
+	"github.com/m3db/m3/src/dbnode/namespace"
+	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/dbnode/persist/fs"
 	"github.com/m3db/m3/src/dbnode/persist/fs/commitlog"
 	"github.com/m3db/m3/src/dbnode/retention"
+	"github.com/m3db/m3/src/dbnode/storage/rollup"
 	"github.com/m3db/m3/src/x/clock"
 	xerrors "github.com/m3db/m3/src/x/errors"
 	"github.com/m3db/m3/src/x/ident"
@@ -285,9 +288,9 @@ func (m *cleanupManager) cleanupDataFiles(t xtime.UnixNano, namespaces []databas
 			continue
 		}
 		earliestToRetain := retention.FlushTimeStart(n.Options().RetentionOptions(), t)
-		shards := n.OwnedShards()
-		multiErr = multiErr.Add(m.cleanupExpiredNamespaceDataFiles(earliestToRetain, shards))
-		multiErr = multiErr.Add(m.cleanupCompactedNamespaceDataFiles(shards))
+		// Pass the databaseNamespace 'n' to cleanupExpiredNamespaceDataFiles
+		multiErr = multiErr.Add(m.cleanupExpiredNamespaceDataFiles(n, earliestToRetain))
+		multiErr = multiErr.Add(m.cleanupCompactedNamespaceDataFiles(n.OwnedShards()))
 	}
 	return multiErr.FinalError()
 }
@@ -347,13 +350,76 @@ func (m *cleanupManager) cleanupDuplicateIndexFiles(namespaces []databaseNamespa
 }
 
 func (m *cleanupManager) cleanupExpiredNamespaceDataFiles(
-	earliestToRetain xtime.UnixNano, shards []databaseShard,
+	n databaseNamespace, earliestToRetain xtime.UnixNano,
 ) error {
 	multiErr := xerrors.NewMultiError()
-	for _, shard := range shards {
+	nsOpts := n.Options()
+	fsOpts := m.opts.CommitLogOptions().FilesystemOptions()
+
+	for _, shard := range n.OwnedShards() {
 		if !shard.IsBootstrapped() {
 			continue
 		}
+
+		// If rollup is configured for the namespace, perform rollup before cleaning up.
+		if nsOpts.RollupOptions() != nil {
+			currentNsRollupOpts := nsOpts.RollupOptions()
+			// Ensure currentNsRollupOpts is not nil again, just in case (though outer check should cover)
+			if currentNsRollupOpts != nil {
+				concreteRollupOpts := rollup.NewOptions().
+					SetResolution(currentNsRollupOpts.Resolution()).
+					SetNewTTL(currentNsRollupOpts.NewTTL())
+
+				// Validate the constructed rollup options
+				if err := concreteRollupOpts.Validate(); err != nil {
+					m.logger.Error("invalid rollup options constructed",
+						zap.Stringer("namespace", n.ID()),
+						zap.Uint32("shard", shard.ID()),
+						zap.Error(err))
+					// Potentially skip rollup for this shard/ns if options are invalid
+				} else {
+					expiredVolumes, err := shard.ListExpiredFileSetVolumes(earliestToRetain)
+					if err != nil {
+						m.logger.Error("failed to list expired fileset volumes for rollup",
+							zap.Stringer("namespace", n.ID()),
+							zap.Uint32("shard", shard.ID()),
+							zap.Error(err))
+						multiErr = multiErr.Add(fmt.Errorf("failed to list expired fileset volumes for shard %d: %w", shard.ID(), err))
+						// Continue to cleanup original files even if listing for rollup fails
+					} else {
+						for _, volumeInfo := range expiredVolumes {
+							m.logger.Info("performing rollup for expired fileset",
+								zap.Stringer("namespace", n.ID()),
+								zap.Uint32("shard", shard.ID()),
+								zap.Time("blockStart", volumeInfo.BlockStart.ToTime()),
+								zap.Int("volume", volumeInfo.VolumeIndex))
+
+							// RollupFileSet expects persist.FileSetVolumeInfo, which volumeInfo is.
+							// It also expects namespace.Options (nsOpts) and fs.Options (fsOpts from persist manager).
+							// Create a tagged scope for this specific rollup operation.
+							rollupScope := m.opts.InstrumentOptions().MetricsScope().SubScope("rollup").
+								Tagged(rollup.TagsForFileSetInfo(volumeInfo, concreteRollupOpts))
+							rollupMetrics := rollup.NewMetrics(rollupScope)
+
+							err = rollup.RollupFileSet(volumeInfo, concreteRollupOpts, nsOpts, fsOpts, rollupMetrics,
+								rollup.DefaultNewReaderFn(), rollup.DefaultNewStreamingWriterFn())
+							if err != nil {
+								m.logger.Error("rollup failed for fileset",
+									zap.Stringer("namespace", n.ID()),
+									zap.Uint32("shard", shard.ID()),
+									zap.Time("blockStart", volumeInfo.BlockStart.ToTime()),
+									zap.Int("volume", volumeInfo.VolumeIndex),
+									zap.Error(err))
+								// For now, don't let rollup failure stop cleanup of original file.
+								// multiErr = multiErr.Add(fmt.Errorf("rollup failed for shard %d, fileset %v: %w", shard.ID(), volumeInfo.BlockStart, err))
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Proceed with original cleanup
 		if err := shard.CleanupExpiredFileSets(earliestToRetain); err != nil {
 			multiErr = multiErr.Add(err)
 		}

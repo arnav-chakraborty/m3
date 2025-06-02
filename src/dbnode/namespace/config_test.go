@@ -232,3 +232,92 @@ metadatas:
 	require.True(t, testRetentionOpts.Equal(opts.RetentionOptions()))
 
 }
+
+func TestRollupConfiguration(t *testing.T) {
+	// Test successful conversion
+	rc := RollupConfiguration{
+		Resolution: "1h",
+		NewTTL:     "30d",
+	}
+	ro, err := rc.RollupOptions()
+	require.NoError(t, err)
+	require.Equal(t, time.Hour, ro.Resolution())
+	require.Equal(t, 30*24*time.Hour, ro.NewTTL())
+
+	// Test invalid resolution
+	rcInvRes := RollupConfiguration{
+		Resolution: "abc",
+		NewTTL:     "30d",
+	}
+	_, err = rcInvRes.RollupOptions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid rollup resolution")
+
+	// Test invalid newTTL
+	rcInvTTL := RollupConfiguration{
+		Resolution: "1h",
+		NewTTL:     "xyz",
+	}
+	_, err = rcInvTTL.RollupOptions()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid rollup newTTL")
+
+	// Test zero resolution (should be caught by RollupOptions.Validate(), not here directly unless we add checks)
+	// For now, time.ParseDuration("0") is zero, which is valid for time.Duration but our RollupOptions.Validate() will catch it.
+	// This test is more about the parsing in RollupConfiguration.RollupOptions().
+	rcZeroRes := RollupConfiguration{
+		Resolution: "0s", // time.ParseDuration will parse this as 0
+		NewTTL:     "24h",
+	}
+	roZero, errZero := rcZeroRes.RollupOptions()
+	require.NoError(t, errZero) // Parsing 0s is fine
+	require.Equal(t, time.Duration(0), roZero.Resolution())
+	// Validation of the zero duration happens in RollupOptions.Validate()
+}
+
+func TestMetadataConfigurationWithRollup(t *testing.T) {
+	id := "test_ns_with_rollup"
+	retentionCfg := retention.Configuration{
+		BlockSize:       2 * time.Hour,
+		RetentionPeriod: 48 * time.Hour,
+	}
+	rollupCfg := &RollupConfiguration{
+		Resolution: "1h",
+		NewTTL:     "720h", // 30 days
+	}
+
+	mc := MetadataConfiguration{
+		ID:        id,
+		Retention: retentionCfg,
+		Rollup:    rollupCfg,
+	}
+
+	md, err := mc.Metadata()
+	require.NoError(t, err)
+	require.NotNil(t, md.Options().RollupOptions())
+	require.Equal(t, time.Hour, md.Options().RollupOptions().Resolution())
+	require.Equal(t, 30*24*time.Hour, md.Options().RollupOptions().NewTTL())
+
+	// Test with nil rollup
+	mcNilRollup := MetadataConfiguration{
+		ID:        "test_ns_nil_rollup",
+		Retention: retentionCfg,
+		Rollup:    nil,
+	}
+	mdNil, errNil := mcNilRollup.Metadata()
+	require.NoError(t, errNil)
+	require.Nil(t, mdNil.Options().RollupOptions())
+
+	// Test with rollup config that leads to error
+	mcErrRollup := MetadataConfiguration{
+		ID:        "test_ns_err_rollup",
+		Retention: retentionCfg,
+		Rollup: &RollupConfiguration{
+			Resolution: "invalid-duration",
+			NewTTL:     "24h",
+		},
+	}
+	_, errErr := mcErrRollup.Metadata()
+	require.Error(t, errErr)
+	require.Contains(t, errErr.Error(), "unable to construct rollup options")
+}

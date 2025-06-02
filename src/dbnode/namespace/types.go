@@ -131,6 +131,33 @@ type Options interface {
 
 	// StagingState returns the state related to a namespace's availability for use.
 	StagingState() StagingState
+
+	// SetRollupOptions sets the rollup options for this namespace.
+	SetRollupOptions(value RollupOptions) Options
+
+	// RollupOptions returns the rollup options for this namespace.
+	RollupOptions() RollupOptions
+}
+
+// RollupOptions controls the rollup options for a namespace.
+type RollupOptions interface {
+	// Validate validates the options.
+	Validate() error
+
+	// Equal returns true if the provide value is equal to this one.
+	Equal(value RollupOptions) bool
+
+	// SetResolution sets the resolution for rolling up data.
+	SetResolution(value time.Duration) RollupOptions
+
+	// Resolution returns the resolution for rolling up data.
+	Resolution() time.Duration
+
+	// SetNewTTL sets the new TTL for rolled up data.
+	SetNewTTL(value time.Duration) RollupOptions
+
+	// NewTTL returns the new TTL for rolled up data.
+	NewTTL() time.Duration
 }
 
 // IndexOptions controls the indexing options for a namespace.

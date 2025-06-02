@@ -1,14 +1,20 @@
 ---
-title: "Mapping Rules"
+title: "M3Aggregator Mapping and Rollup Rules"
 weight: 13
 ---
+
+This page describes Mapping Rules and Rollup Rules as configured in M3Coordinator, which apply to the M3Aggregator service for metrics processing *before* they are stored in M3DB. These rules allow for flexible downsampling, aggregation, and retitling of metrics as they flow through the aggregation tier.
+
+If you are looking for information on M3DB's automatic data rollup feature, which downsamples data *already stored in M3DB* as it nears its original TTL, please see the [M3DB Data Rollup documentation](/docs/operational_guide/rollup).
+
+## Mapping Rules
 
 Mapping rules are used to configure the storage policy for metrics. The storage policy
 determines how long to store metrics for and at what resolution to keep them at.
 For example, a storage policy of `1m:48h` tells M3 to keep the metrics for `48hrs` at a
 `1min` resolution. Mapping rules can be configured in the `m3coordinator` configuration file
 under the `downsample` > `rules` > `mappingRules` stanza. We will use the following as an
-example. 
+example.
 
 ```yaml
 downsample:

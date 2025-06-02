@@ -25,8 +25,32 @@ import (
 	"time"
 
 	"github.com/m3db/m3/src/dbnode/retention"
+	"time"
+
+	"github.com/m3db/m3/src/dbnode/retention"
 	"github.com/m3db/m3/src/x/ident"
 )
+
+// RollupConfiguration is the configuration for rolling up a namespace.
+type RollupConfiguration struct {
+	Resolution string `yaml:"resolution" validate:"nonzero"` // e.g., "1h", "2h"
+	NewTTL     string `yaml:"newTTL"     validate:"nonzero"` // e.g., "30d", "60d"
+}
+
+// RollupOptions converts the RollupConfiguration to RollupOptions.
+func (rc *RollupConfiguration) RollupOptions() (RollupOptions, error) {
+	resolution, err := time.ParseDuration(rc.Resolution)
+	if err != nil {
+		return nil, fmt.Errorf("invalid rollup resolution: %w", err)
+	}
+	newTTL, err := time.ParseDuration(rc.NewTTL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid rollup newTTL: %w", err)
+	}
+	return NewRollupOptions().
+		SetResolution(resolution).
+		SetNewTTL(newTTL), nil
+}
 
 // MapConfiguration is the configuration for a registry of namespaces
 type MapConfiguration struct {
@@ -58,6 +82,7 @@ type MetadataConfiguration struct {
 	CacheBlocksOnRetrieve *bool                   `yaml:"cacheBlocksOnRetrieve"`
 	Retention             retention.Configuration `yaml:"retention" validate:"nonzero"`
 	Index                 IndexConfiguration      `yaml:"index"`
+	Rollup                *RollupConfiguration    `yaml:"rollup"`
 }
 
 // Metadata returns a Metadata corresponding to the receiver struct
@@ -87,6 +112,13 @@ func (mc *MetadataConfiguration) Metadata() (Metadata, error) {
 	}
 	if v := mc.CacheBlocksOnRetrieve; v != nil {
 		opts = opts.SetCacheBlocksOnRetrieve(*v)
+	}
+	if mc.Rollup != nil {
+		rollupOpts, err := mc.Rollup.RollupOptions()
+		if err != nil {
+			return nil, fmt.Errorf("unable to construct rollup options for [%s]: %w", mc.ID, err)
+		}
+		opts = opts.SetRollupOptions(rollupOpts)
 	}
 	return NewMetadata(ident.StringID(mc.ID), opts)
 }

@@ -598,6 +598,10 @@ type databaseShard interface {
 	// fileset for that block.
 	CleanupCompactedFileSets() error
 
+	// ListExpiredFileSetVolumes returns a list of fileset volume information for
+	// filesets that are older than the earliestToRetain time.
+	ListExpiredFileSetVolumes(earliestToRetain xtime.UnixNano) ([]persist.FileSetVolumeInfo, error)
+
 	// Repair repairs the shard data for a given time.
 	Repair(
 		ctx context.Context,

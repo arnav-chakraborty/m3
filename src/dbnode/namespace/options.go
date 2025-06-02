@@ -22,6 +22,8 @@ package namespace
 
 import (
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/m3db/m3/src/dbnode/retention"
 )
@@ -59,7 +61,57 @@ var (
 	errIndexBlockSizeMustBeAMultipleOfDataBlockSize = errors.New("index block size must be a multiple of data block size")
 	errNamespaceRuntimeOptionsNotSet                = errors.New("namespace runtime options is not set")
 	errAggregationOptionsNotSet                     = errors.New("aggregation options is not set")
+	errRollupResolutionPositive                     = errors.New("rollup resolution must be positive")
+	errRollupNewTTLPositive                         = errors.New("rollup new TTL must be positive")
 )
+
+type rollupOptions struct {
+	resolution time.Duration
+	newTTL     time.Duration
+}
+
+// NewRollupOptions creates a new rollup options.
+func NewRollupOptions() RollupOptions {
+	return &rollupOptions{}
+}
+
+func (ro *rollupOptions) Validate() error {
+	if ro.resolution <= 0 {
+		return errRollupResolutionPositive
+	}
+	if ro.newTTL <= 0 {
+		return errRollupNewTTLPositive
+	}
+	return nil
+}
+
+func (ro *rollupOptions) Equal(value RollupOptions) bool {
+	if value == nil {
+		return false
+	}
+	return ro.resolution == value.Resolution() &&
+		ro.newTTL == value.NewTTL()
+}
+
+func (ro *rollupOptions) SetResolution(value time.Duration) RollupOptions {
+	opts := *ro
+	opts.resolution = value
+	return &opts
+}
+
+func (ro *rollupOptions) Resolution() time.Duration {
+	return ro.resolution
+}
+
+func (ro *rollupOptions) SetNewTTL(value time.Duration) RollupOptions {
+	opts := *ro
+	opts.newTTL = value
+	return &opts
+}
+
+func (ro *rollupOptions) NewTTL() time.Duration {
+	return ro.newTTL
+}
 
 type options struct {
 	bootstrapEnabled      bool
@@ -77,6 +129,7 @@ type options struct {
 	extendedOpts          ExtendedOptions
 	aggregationOpts       AggregationOptions
 	stagingState          StagingState
+	rollupOpts            RollupOptions
 }
 
 // NewSchemaHistory returns an empty schema history.
@@ -100,6 +153,7 @@ func NewOptions() Options {
 		schemaHis:             NewSchemaHistory(),
 		runtimeOpts:           NewRuntimeOptions(),
 		aggregationOpts:       NewAggregationOptions(),
+		// rollupOpts is nil by default
 	}
 }
 
@@ -116,6 +170,12 @@ func (o *options) Validate() error {
 
 	if err := o.stagingState.Validate(); err != nil {
 		return err
+	}
+
+	if o.rollupOpts != nil {
+		if err := o.rollupOpts.Validate(); err != nil {
+			return fmt.Errorf("invalid rollup options: %w", err)
+		}
 	}
 
 	if !o.indexOpts.Enabled() {
@@ -147,6 +207,17 @@ func (o *options) Validate() error {
 }
 
 func (o *options) Equal(value Options) bool {
+	if o.rollupOpts == nil && value.RollupOptions() != nil {
+		return false
+	}
+	if o.rollupOpts != nil && value.RollupOptions() == nil {
+		return false
+	}
+	if o.rollupOpts != nil && value.RollupOptions() != nil &&
+		!o.rollupOpts.Equal(value.RollupOptions()) {
+		return false
+	}
+
 	return o.bootstrapEnabled == value.BootstrapEnabled() &&
 		o.flushEnabled == value.FlushEnabled() &&
 		o.writesToCommitLog == value.WritesToCommitLog() &&
@@ -311,4 +382,14 @@ func (o *options) SetStagingState(value StagingState) Options {
 
 func (o *options) StagingState() StagingState {
 	return o.stagingState
+}
+
+func (o *options) SetRollupOptions(value RollupOptions) Options {
+	opts := *o
+	opts.rollupOpts = value
+	return &opts
+}
+
+func (o *options) RollupOptions() RollupOptions {
+	return o.rollupOpts
 }

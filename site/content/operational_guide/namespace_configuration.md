@@ -249,3 +249,34 @@ Options related to downsampling data
 
 ###### _all_
 Whether to send datapoints to this namespace. If false, the coordinator will not auto-aggregate incoming datapoints and datapoints must be sent the namespace via rules. Defaults to true.
+
+### rollup (Optional)
+
+This section configures the automatic data rollup for the namespace. If this section is present, M3DB will attempt to roll up data from this namespace to a new resolution with a new TTL when its original filesets expire.
+
+For more detailed information about the rollup feature, see the [Data Rollup documentation](/docs/operational_guide/rollup).
+
+Can be modified without creating a new namespace: `yes` (Note: Changes will apply to filesets expiring *after* the configuration change is applied and propagated).
+
+**Example:**
+
+```yaml
+namespaces:
+  - id: "my_namespace_with_rollup"
+    # ... other namespace options ...
+    retentionOptions:
+      retentionPeriodDuration: "48h" # Original data TTL
+      blockSizeDuration: "2h"
+      # ... other retention options ...
+    rollup:
+      resolution: "1h"    # Target resolution for rollup, e.g., 1 hour
+      newTTL: "720h"      # TTL for the rolled-up data, e.g., 30 days
+```
+
+#### resolution
+
+(String) The target resolution for the rollup (e.g., "5m", "1h", "6h"). This duration string must be parsable by Go's `time.ParseDuration`. This value defines the block size of the rolled-up data.
+
+#### newTTL
+
+(String) The Time-To-Live for the data once it has been rolled up to the new resolution (e.g., "30d", "90d", "365d"). This duration string must be parsable by Go's `time.ParseDuration`. This defines the retention period for the rolled-up data.
