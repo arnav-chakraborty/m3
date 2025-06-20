@@ -45,6 +45,6 @@ func CPUCore() int {
 		// and got 1 back.
 		return 0
 	}
-	// We know the number of cores, try to call RDTSCP to get the core.
+	// We know the number of cores, try to call the platform-specific getCore().
 	return getCore()
 }
